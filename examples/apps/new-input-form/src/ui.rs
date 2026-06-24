@@ -77,6 +77,7 @@ pub fn render_chat(
     command_mode: CommandMode,
     command_picker: Option<&CommandPicker>,
     spinner_frame: usize,
+    follow_transcript: bool,
 ) {
     let picker_height = command_picker
         .map(|picker| picker_popup_height(picker) + 2)
@@ -100,6 +101,9 @@ pub fn render_chat(
     };
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
+    let transcript_lines = transcript_lines(history, session);
+    let transcript_height = transcript_body.height as usize;
+    let transcript_start = transcript_lines.len().saturating_sub(transcript_height.max(1));
 
     let header = match session {
         Some(session) => Line::from_iter([
@@ -115,10 +119,18 @@ pub fn render_chat(
     let sidebar = render_sidebar(history, session);
     frame.render_widget(sidebar, sidebar_area);
 
-    let transcript_lines = transcript_lines(history, session);
-    let transcript = List::new(transcript_lines).block(
+    let transcript = List::new(transcript_lines.into_iter().skip(transcript_start).collect::<Vec<_>>()).block(
         Block::bordered()
-            .title(Line::from("Transcript").style(Style::new().bold())),
+            .title(Line::from(vec![
+                Span::from("Transcript").style(Style::new().bold()),
+                Span::from(" "),
+                Span::from(if follow_transcript { "auto-follow" } else { "paused" })
+                    .style(if follow_transcript {
+                        Style::new().dark_gray()
+                    } else {
+                        Style::new().fg(Color::Yellow)
+                    }),
+            ])),
     );
     frame.render_widget(transcript, transcript_body);
 
@@ -317,7 +329,13 @@ fn render_message(message: &Message) -> ListItem<'static> {
     let role_style = match message.role {
         crate::agent::Role::System => Style::new().fg(Color::Blue),
         crate::agent::Role::User => Style::new().fg(Color::Green),
-        crate::agent::Role::Assistant => Style::new().fg(Color::Cyan),
+        crate::agent::Role::Assistant => {
+            if message.content.starts_with("thinking...") {
+                Style::new().fg(Color::Yellow)
+            } else {
+                Style::new().fg(Color::Cyan)
+            }
+        },
         crate::agent::Role::Tool => Style::new().fg(Color::Yellow),
     };
     let mut lines = vec![
@@ -327,7 +345,12 @@ fn render_message(message: &Message) -> ListItem<'static> {
         ]),
     ];
     for extra in message.content.lines().skip(1) {
-        lines.push(Line::from(extra.to_string()).style(Style::new().dark_gray()));
+        let extra_style = if message.content.starts_with("thinking...") {
+            Style::new().fg(Color::Yellow)
+        } else {
+            Style::new().dark_gray()
+        };
+        lines.push(Line::from(format!("  {extra}")).style(extra_style));
     }
     ListItem::new(lines)
 }
@@ -343,6 +366,10 @@ fn render_tool_message(message: &Message) -> ListItem<'static> {
             1 if line.starts_with("status:") => Line::from(vec![
                 Span::from("  ").style(Style::new().dark_gray()),
                 Span::from(line.to_string()).style(Style::new().fg(Color::Yellow)),
+            ]),
+            1 if line.contains("running ->") => Line::from(vec![
+                Span::from("  ").style(Style::new().dark_gray()),
+                Span::from(line.to_string()).style(Style::new().fg(Color::Yellow).bold()),
             ]),
             1 if line.starts_with("launch error:") => Line::from(vec![
                 Span::from("  ").style(Style::new().dark_gray()),
@@ -394,6 +421,7 @@ mod tests {
                     CommandMode::None,
                     None,
                     1,
+                    true,
                 )
             })
             .expect("draw interrupted session");
@@ -419,6 +447,7 @@ mod tests {
                     CommandMode::None,
                     None,
                     2,
+                    true,
                 )
             })
             .expect("draw running session");
@@ -444,9 +473,103 @@ mod tests {
                     CommandMode::None,
                     None,
                     3,
+                    true,
                 )
             })
             .expect("draw tool transcript");
+    }
+
+    #[test]
+    fn render_chat_highlights_thinking_and_running_states() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        session.messages.push(Message::assistant("thinking...\n- analyzing request"));
+        session.messages.push(Message::tool("tool: shell_command running -> sleep 2"));
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    Some(&session),
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    3,
+                    true,
+                )
+            })
+            .expect("draw highlighted states");
+
+        let transcript = transcript_lines(&[], Some(&session));
+        let transcript_dump = transcript
+            .iter()
+            .map(|item| format!("{item:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript_dump.contains("thinking..."));
+        assert!(transcript_dump.contains("running ->"));
+    }
+
+    #[test]
+    fn render_chat_labels_transcript_as_auto_following() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    0,
+                    true,
+                )
+            })
+            .expect("draw chat");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Transcript"));
+        assert!(rendered.contains("auto-follow"));
+    }
+
+    #[test]
+    fn render_chat_labels_transcript_as_paused_when_follow_is_disabled() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    0,
+                    false,
+                )
+            })
+            .expect("draw chat");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Transcript"));
+        assert!(rendered.contains("paused"));
     }
 
     #[test]
@@ -525,6 +648,7 @@ mod tests {
                     CommandMode::None,
                     None,
                     0,
+                    true,
                 )
             })
             .expect("draw footer");
@@ -537,6 +661,23 @@ mod tests {
             .collect::<String>();
         assert!(footer.contains("@ files/folders"));
         assert!(footer.contains("/ actions"));
+    }
+
+    #[test]
+    fn render_chat_keeps_latest_thinking_message_in_view() {
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        session.messages.push(Message::assistant("thinking...\n- analyzing request"));
+        for index in 0..20 {
+            session.messages.push(Message::user(format!("message {index}")));
+        }
+
+        let transcript = transcript_lines(&[], Some(&session));
+        assert!(transcript.iter().any(|item| {
+            format!("{item:?}").contains("thinking...")
+        }));
+        assert!(transcript.iter().any(|item| {
+            format!("{item:?}").contains("message 19")
+        }));
     }
 }
 

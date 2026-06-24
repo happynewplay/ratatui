@@ -140,13 +140,21 @@ impl Session {
             return None;
         }
 
-        self.messages.push(Message::user(input));
-        let assistant_index = self.messages.len();
-        self.messages.push(Message::assistant(String::new()));
-
         let action = turn_action_for(input, self.kind, self.model);
         let assistant_text = action.assistant_text(self.kind, self.model);
         let chunks = chunk_text(&assistant_text);
+
+        self.messages.push(Message::user(input));
+        self.messages
+            .push(Message::assistant(PendingTurn::thinking_message(
+                &action,
+                0,
+                false,
+                false,
+                false,
+            )));
+        let assistant_index = self.messages.len();
+        self.messages.push(Message::assistant(String::new()));
 
         Some(PendingTurn {
             assistant_index,
@@ -182,12 +190,78 @@ impl PendingTurn {
         self.interrupt_requested
     }
 
+    fn thinking_message(
+        action: &TurnAction,
+        stage: usize,
+        shell_job_running: bool,
+        shell_result_ready: bool,
+        shell_running_emitted: bool,
+    ) -> String {
+        let mut lines = vec!["thinking...".to_string()];
+        match action {
+            TurnAction::ShellCommand { .. } => {
+                lines.push("- analyzing request".to_string());
+                if stage > 0 {
+                    lines.push("- drafting response".to_string());
+                }
+                if stage >= 1 {
+                    lines.push("- preparing execution".to_string());
+                }
+                if shell_job_running && !shell_result_ready {
+                    lines.push("- running tools".to_string());
+                    lines.push("- waiting for output".to_string());
+                }
+                if shell_running_emitted {
+                    lines.push("- streaming command output".to_string());
+                }
+                if shell_result_ready {
+                    lines.push("- combining results".to_string());
+                }
+            }
+            TurnAction::ReviewDiff { target } => {
+                lines.push(format!("- reviewing {target}"));
+                if stage > 0 {
+                    lines.push("- checking risks".to_string());
+                }
+                if shell_result_ready {
+                    lines.push("- finalizing review".to_string());
+                }
+            }
+            TurnAction::BuildPlan { subject } => {
+                lines.push(format!("- outlining {subject}"));
+                if stage > 0 {
+                    lines.push("- ordering steps".to_string());
+                }
+                if shell_result_ready {
+                    lines.push("- finalizing plan".to_string());
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn update_thinking_message(&self, session: &mut Session) {
+        let thinking_index = self.assistant_index.saturating_sub(1);
+        if let Some(message) = session.messages.get_mut(thinking_index) {
+            message.content = Self::thinking_message(
+                &self.action,
+                self.stage,
+                self.shell_job.is_some(),
+                self.shell_result.is_some(),
+                self.shell_running_emitted,
+            );
+        }
+    }
+
     pub fn tick(&mut self, session: &mut Session) -> bool {
+        self.update_thinking_message(session);
+
         if self.stage < self.chunks.len() {
             session.messages[self.assistant_index]
                 .content
                 .push_str(&self.chunks[self.stage]);
             self.stage += 1;
+            self.update_thinking_message(session);
             return false;
         }
 
@@ -221,12 +295,14 @@ impl PendingTurn {
                             };
                             self.shell_result = Some(CommandResult::interrupted(command));
                             self.finish_command(session);
+                            self.update_thinking_message(session);
                             self.stage += 1;
                             return true;
                         }
                         let Some(job) = self.shell_job.as_ref() else {
                             self.shell_result = Some(CommandResult::worker_disconnected());
                             self.finish_command(session);
+                            self.update_thinking_message(session);
                             self.stage += 1;
                             return true;
                         };
@@ -238,18 +314,21 @@ impl PendingTurn {
                                         .messages
                                         .push(Message::tool(self.action.running_message()));
                                     self.shell_running_emitted = true;
+                                    self.update_thinking_message(session);
                                 }
                                 return false;
                             }
                         }
                     }
                     self.finish_command(session);
+                    self.update_thinking_message(session);
                     self.stage += 1;
                     return true;
                 }
                 _ => {
                     session.messages
                         .push(Message::assistant(self.action.final_message(None)));
+                    self.update_thinking_message(session);
                     self.stage += 1;
                     return true;
                 }

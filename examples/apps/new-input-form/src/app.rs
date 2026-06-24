@@ -27,6 +27,7 @@ pub struct App {
     active_turn: Option<PendingTurn>,
     command_mode: CommandMode,
     command_picker: Option<CommandPicker>,
+    follow_transcript: bool,
 }
 
 impl Default for App {
@@ -42,6 +43,7 @@ impl Default for App {
             active_turn: None,
             command_mode: CommandMode::None,
             command_picker: None,
+            follow_transcript: true,
         }
     }
 }
@@ -132,6 +134,9 @@ impl App {
                 self.command_mode = CommandMode::None;
                 self.command_picker = None;
             }
+            KeyCode::Char('t') => {
+                self.follow_transcript = !self.follow_transcript;
+            }
             KeyCode::Char('@') => {
                 self.command_mode = CommandMode::Files;
                 self.command_picker = Some(CommandPicker::files(current_dir()));
@@ -217,6 +222,7 @@ impl App {
                 self.command_mode,
                 self.command_picker.as_ref(),
                 self.spinner_frame,
+                self.follow_transcript,
             ),
         }
     }
