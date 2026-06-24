@@ -2,7 +2,7 @@ use crate::agent::{PendingTurn, Session, SessionKind, ModelKind};
 use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome};
 use crate::ui;
 use color_eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
 use std::time::Duration;
 use std::{env, path::PathBuf};
 use ratatui::{DefaultTerminal, Frame};
@@ -28,6 +28,7 @@ pub struct App {
     command_mode: CommandMode,
     command_picker: Option<CommandPicker>,
     follow_transcript: bool,
+    transcript_scroll: usize,
 }
 
 impl Default for App {
@@ -44,6 +45,7 @@ impl Default for App {
             command_mode: CommandMode::None,
             command_picker: None,
             follow_transcript: true,
+            transcript_scroll: 0,
         }
     }
 }
@@ -54,15 +56,17 @@ impl App {
             terminal.draw(|frame| self.render(frame))?;
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
             if event::poll(Duration::from_millis(50))? {
-                if let Some(event) = Self::read_key_event()? {
-                    match self.state {
-                        AppState::SessionSelect => self.handle_session_select(event),
-                        AppState::ModelSelect => self.handle_model_select(event),
-                        AppState::Chat => {
-                            if self.handle_chat(event) {
+                if let Some(event) = Self::read_event()? {
+                    match (self.state, event) {
+                        (AppState::SessionSelect, Event::Key(key)) => self.handle_session_select(key),
+                        (AppState::ModelSelect, Event::Key(key)) => self.handle_model_select(key),
+                        (AppState::Chat, Event::Key(key)) => {
+                            if self.handle_chat(key) {
                                 return Ok(());
                             }
                         }
+                        (AppState::Chat, Event::Mouse(mouse)) => self.handle_mouse(mouse),
+                        _ => {}
                     }
                 }
             } else {
@@ -76,14 +80,29 @@ impl App {
         }
     }
 
-    fn read_key_event() -> Result<Option<KeyEvent>> {
+    fn read_event() -> Result<Option<Event>> {
         let event = event::read()?;
         Ok(match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                Some(key)
+                Some(Event::Key(key))
             }
+            Event::Mouse(mouse) => Some(Event::Mouse(mouse)),
             _ => None,
         })
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_add(1);
+            }
+            MouseEventKind::ScrollDown => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
     }
 
     fn handle_session_select(&mut self, key: KeyEvent) {
@@ -125,6 +144,14 @@ impl App {
     fn handle_chat(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Up | KeyCode::Char('k') if self.command_picker.is_none() => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_add(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.command_picker.is_none() => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+            }
             KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                 if let Some(turn) = self.active_turn.as_mut() {
                     turn.request_interrupt();
@@ -136,6 +163,9 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.follow_transcript = !self.follow_transcript;
+                if self.follow_transcript {
+                    self.transcript_scroll = 0;
+                }
             }
             KeyCode::Char('@') => {
                 self.command_mode = CommandMode::Files;
@@ -223,6 +253,7 @@ impl App {
                 self.command_picker.as_ref(),
                 self.spinner_frame,
                 self.follow_transcript,
+                self.transcript_scroll,
             ),
         }
     }
@@ -235,7 +266,7 @@ fn current_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     #[test]
     fn escape_closes_open_command_picker() {
@@ -262,6 +293,34 @@ mod tests {
 
         assert!(!should_quit);
         assert_eq!(app.command_mode, CommandMode::None);
+    }
+
+    #[test]
+    fn scrolling_transcript_disables_auto_follow() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(!app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(!app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 1);
     }
 
     #[test]

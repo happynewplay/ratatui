@@ -78,6 +78,7 @@ pub fn render_chat(
     command_picker: Option<&CommandPicker>,
     spinner_frame: usize,
     follow_transcript: bool,
+    transcript_scroll: usize,
 ) {
     let picker_height = command_picker
         .map(|picker| picker_popup_height(picker) + 2)
@@ -103,7 +104,14 @@ pub fn render_chat(
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
     let transcript_lines = transcript_lines(history, session);
     let transcript_height = transcript_body.height as usize;
-    let transcript_start = transcript_lines.len().saturating_sub(transcript_height.max(1));
+    let transcript_window = transcript_height.max(1);
+    let transcript_start = if follow_transcript {
+        transcript_lines.len().saturating_sub(transcript_window)
+    } else {
+        transcript_scroll.min(transcript_lines.len().saturating_sub(transcript_window))
+    };
+    let transcript_total = transcript_lines.len().max(1);
+    let transcript_position = transcript_start.saturating_add(1).min(transcript_total);
 
     let header = match session {
         Some(session) => Line::from_iter([
@@ -124,12 +132,16 @@ pub fn render_chat(
             .title(Line::from(vec![
                 Span::from("Transcript").style(Style::new().bold()),
                 Span::from(" "),
-                Span::from(if follow_transcript { "auto-follow" } else { "paused" })
-                    .style(if follow_transcript {
-                        Style::new().dark_gray()
-                    } else {
-                        Style::new().fg(Color::Yellow)
-                    }),
+                Span::from(if follow_transcript {
+                    "auto-follow".to_string()
+                } else {
+                    format!("paused {transcript_position}/{transcript_total}")
+                })
+                .style(if follow_transcript {
+                    Style::new().dark_gray()
+                } else {
+                    Style::new().fg(Color::Yellow)
+                }),
             ])),
     );
     frame.render_widget(transcript, transcript_body);
@@ -422,6 +434,7 @@ mod tests {
                     None,
                     1,
                     true,
+                    0,
                 )
             })
             .expect("draw interrupted session");
@@ -448,6 +461,7 @@ mod tests {
                     None,
                     2,
                     true,
+                    0,
                 )
             })
             .expect("draw running session");
@@ -474,6 +488,7 @@ mod tests {
                     None,
                     3,
                     true,
+                    0,
                 )
             })
             .expect("draw tool transcript");
@@ -498,6 +513,7 @@ mod tests {
                     None,
                     3,
                     true,
+                    0,
                 )
             })
             .expect("draw highlighted states");
@@ -528,6 +544,7 @@ mod tests {
                     None,
                     0,
                     true,
+                    0,
                 )
             })
             .expect("draw chat");
@@ -558,6 +575,7 @@ mod tests {
                     None,
                     0,
                     false,
+                    0,
                 )
             })
             .expect("draw chat");
@@ -570,6 +588,58 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Transcript"));
         assert!(rendered.contains("paused"));
+    }
+
+    #[test]
+    fn render_chat_shows_transcript_position_when_paused() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        session.messages.push(Message::assistant("thinking..."));
+        session.messages.push(Message::user("one"));
+        session.messages.push(Message::user("two"));
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    Some(&session),
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    0,
+                    false,
+                    1,
+                )
+            })
+            .expect("draw paused transcript");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("paused"));
+        assert!(rendered.contains("/"));
+    }
+
+    #[test]
+    fn render_chat_scrolls_transcript_when_paused() {
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        session.messages.push(Message::assistant("thinking...\n- analyzing request"));
+        for index in 0..10 {
+            session.messages.push(Message::user(format!("message {index}")));
+        }
+        let transcript = transcript_lines(&[], Some(&session));
+        let transcript_dump = transcript
+            .iter()
+            .map(|item| format!("{item:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript_dump.contains("message 9"));
+        assert!(transcript_dump.contains("thinking..."));
     }
 
     #[test]
@@ -649,6 +719,7 @@ mod tests {
                     None,
                     0,
                     true,
+                    0,
                 )
             })
             .expect("draw footer");
