@@ -174,9 +174,13 @@ pub fn render_chat(
             })
             .chain([
                 Span::from("Enter").bold(),
-                Span::from(" to send, "),
+                Span::from(" send  "),
                 Span::from("q").bold(),
-                Span::from(" to quit."),
+                Span::from(" quit  "),
+                Span::from("@").bold(),
+                Span::from(" files/folders  "),
+                Span::from("/").bold(),
+                Span::from(" actions"),
             ])
             .collect::<Vec<_>>(),
     )
@@ -206,16 +210,26 @@ fn render_command_picker(picker: &CommandPicker) -> List<'static> {
                 rendered.push(ListItem::new(line));
             }
             PickerAction::Insert(_) => {
-                let line = if absolute_index == picker.selected {
-                    let active_style = match picker.kind {
-                        CommandKind::Files => Style::new().fg(Color::Black).bg(Color::Cyan),
-                        CommandKind::Actions => Style::new().fg(Color::Black).bg(Color::Yellow),
-                    };
+                let active_style = match picker.kind {
+                    CommandKind::Files => Style::new().fg(Color::Black).bg(Color::Cyan),
+                    CommandKind::Actions => Style::new().fg(Color::Black).bg(Color::Yellow),
+                };
+                let primary = if absolute_index == picker.selected {
                     Line::from(item.label.clone()).style(active_style)
                 } else {
-                    Line::from(item.label.clone())
+                    Line::from(item.label.clone()).style(Style::new().fg(Color::White))
                 };
-                rendered.push(ListItem::new(line));
+                let mut lines = vec![primary];
+                if let Some(secondary) = &item.secondary {
+                    let secondary_line = if absolute_index == picker.selected {
+                        Line::from(format!("  {secondary}"))
+                            .style(active_style.patch(Style::new().dark_gray()))
+                    } else {
+                        Line::from(format!("  {secondary}")).style(Style::new().dark_gray())
+                    };
+                    lines.push(secondary_line);
+                }
+                rendered.push(ListItem::new(lines));
             }
         }
     }
@@ -456,6 +470,7 @@ mod tests {
         picker.items = (0..12)
             .map(|i| crate::input_commands::PickerItem {
                 label: format!("@l{i}.rs"),
+                secondary: None,
                 action: crate::input_commands::PickerAction::Insert(format!("@l{i}.rs")),
             })
             .collect();
@@ -472,6 +487,56 @@ mod tests {
         assert_eq!(picker_window_start(9, 12, 10), 0);
         assert_eq!(picker_window_start(10, 12, 10), 1);
         assert_eq!(picker_window_start(11, 12, 10), 2);
+    }
+
+    #[test]
+    fn picker_items_render_secondary_path_for_files() {
+        let picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: crate::input_commands::PickerStage::Files,
+            root: ".".into(),
+            filter: String::new(),
+            selected: 0,
+            items: vec![crate::input_commands::PickerItem {
+                label: "alpha.rs".to_string(),
+                secondary: Some("src/alpha.rs".to_string()),
+                action: crate::input_commands::PickerAction::Insert("@src/alpha.rs".to_string()),
+            }],
+        };
+
+        let list = render_command_picker(&picker);
+        let rendered = format!("{list:?}");
+        assert!(rendered.contains("alpha.rs"));
+        assert!(rendered.contains("src/alpha.rs"));
+    }
+
+    #[test]
+    fn render_chat_footer_mentions_picker_shortcuts() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    0,
+                )
+            })
+            .expect("draw footer");
+
+        let buffer = terminal.backend().buffer();
+        let footer = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(footer.contains("@ files/folders"));
+        assert!(footer.contains("/ actions"));
     }
 }
 
