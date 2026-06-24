@@ -149,6 +149,9 @@ impl App {
     fn handle_chat(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Esc if self.choice_group.is_some() => {
+                self.choice_group = None;
+            }
             KeyCode::Up | KeyCode::Char('k') if self.choice_group.is_some() => {
                 if let Some(choice_group) = self.choice_group.as_mut() {
                     choice_group.move_focus_up();
@@ -260,7 +263,7 @@ impl App {
                 self.input.handle_event(&Event::Key(key));
             }
             _ => {
-                if matches!(self.command_mode, CommandMode::None) {
+                if self.choice_group.is_none() && matches!(self.command_mode, CommandMode::None) {
                     self.input.handle_event(&Event::Key(key));
                 }
             }
@@ -280,6 +283,8 @@ impl App {
             if self.choice_group.is_none() {
                 if let Some(choice_group) = session.take_pending_choice_group() {
                     self.choice_group = Some(crate::agent::ChoiceGroupState::new(choice_group));
+                    self.follow_transcript = true;
+                    self.transcript_scroll = 0;
                 }
             }
             self.history.push(session.clone());
@@ -322,13 +327,44 @@ mod tests {
         let mut app = App::default();
         app.state = AppState::Chat;
         app.command_mode = CommandMode::Files;
-        app.command_picker = Some(CommandPicker::actions());
+        app.command_picker = Some(CommandPicker::files("/workspace"));
 
         let should_quit = app.handle_chat(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(!should_quit);
         assert_eq!(app.command_mode, CommandMode::None);
         assert!(app.command_picker.is_none());
+    }
+
+    #[test]
+    fn escape_restores_input_after_command_picker() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.command_mode = CommandMode::Files;
+        app.command_picker = Some(CommandPicker::files("/workspace"));
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.command_picker.is_none());
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(app.input.value(), "x");
+    }
+
+    #[test]
+    fn command_picker_characters_go_to_filter_not_input() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.command_mode = CommandMode::Files;
+        app.command_picker = Some(CommandPicker::files("/workspace"));
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+        assert_eq!(app.input.value(), "");
+        assert_eq!(
+            app.command_picker
+                .as_ref()
+                .map(|picker| picker.prompt().to_string()),
+            Some("l".to_string())
+        );
     }
 
     #[test]
@@ -491,10 +527,68 @@ mod tests {
     }
 
     #[test]
+    fn escape_closes_open_choice_group() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Pick".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                    ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        }));
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(app.choice_group.is_none());
+    }
+
+    #[test]
+    fn choice_group_characters_do_not_enter_input() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Pick".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                    ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        }));
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert_eq!(app.input.value(), "");
+        assert!(app.choice_group.is_some());
+        assert!(matches!(
+            app.choice_group.as_ref().unwrap().focus,
+            FocusTarget::Question {
+                question_index: 0,
+                option_index: 0,
+            }
+        ));
+    }
+
+    #[test]
     fn tick_active_turn_auto_opens_choice_group_from_assistant_payload() {
         let mut app = App::default();
         app.state = AppState::Chat;
         app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.follow_transcript = false;
+        app.transcript_scroll = 7;
         app.active_turn = app
             .current_session
             .as_mut()
@@ -505,6 +599,8 @@ mod tests {
         }
 
         assert!(app.choice_group.is_some());
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
         assert!(
             app.current_session
                 .as_mut()

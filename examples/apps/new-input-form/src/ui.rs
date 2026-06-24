@@ -209,29 +209,57 @@ pub fn render_chat(
     let cursor = input.visual_cursor().saturating_sub(scroll) as u16;
     frame.set_cursor_position((input_area.x + 1 + cursor, input_area.y + 1));
 
-    let footer = Line::from_iter(
-        status
-            .into_iter()
-            .flat_map(|status| {
-                vec![
-                    Span::from(status).style(Style::new().fg(Color::Magenta)),
-                    Span::from("  "),
-                ]
-            })
-            .chain([
-                Span::from("Enter").bold(),
-                Span::from(" send  "),
-                Span::from("q").bold(),
-                Span::from(" quit  "),
-                Span::from("@").bold(),
-                Span::from(" files/folders  "),
-                Span::from("/").bold(),
-                Span::from(" actions"),
-            ])
-            .collect::<Vec<_>>(),
-    )
-    .style(Style::new().dark_gray());
+    let footer = build_footer(command_mode, command_picker, choice_group, status);
     frame.render_widget(footer, input_area.inner(Margin::new(1, 0)));
+}
+
+fn build_footer(
+    command_mode: CommandMode,
+    command_picker: Option<&CommandPicker>,
+    choice_group: Option<&ChoiceGroupState>,
+    status: Option<String>,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some(status) = status {
+        spans.push(Span::from(status).style(Style::new().fg(Color::Magenta)));
+        spans.push(Span::from("  "));
+    }
+
+    if choice_group.is_some() {
+        spans.extend([
+            Span::from("Enter").bold(),
+            Span::from(" submit  "),
+            Span::from("Esc").bold(),
+            Span::from(" close  "),
+            Span::from("q").bold(),
+            Span::from(" quit"),
+        ]);
+    } else if command_picker.is_some() {
+        spans.extend([
+            Span::from("Enter").bold(),
+            Span::from(" select  "),
+            Span::from("Esc").bold(),
+            Span::from(" close  "),
+            Span::from("q").bold(),
+            Span::from(" quit"),
+        ]);
+    } else {
+        spans.extend([
+            Span::from("Enter").bold(),
+            Span::from(" send  "),
+            Span::from("q").bold(),
+            Span::from(" quit  "),
+            Span::from("@").bold(),
+            Span::from(" files/folders  "),
+            Span::from("/").bold(),
+            Span::from(" actions"),
+        ]);
+        if matches!(command_mode, CommandMode::None) {
+            spans.push(Span::from(""));
+        }
+    }
+
+    Line::from_iter(spans).style(Style::new().dark_gray())
 }
 
 fn choice_group_height(state: &ChoiceGroupState) -> u16 {
@@ -902,6 +930,52 @@ mod tests {
             .collect::<String>();
         assert!(footer.contains("@ files/folders"));
         assert!(footer.contains("/ actions"));
+    }
+
+    #[test]
+    fn render_chat_footer_mentions_choice_shortcuts() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let choice_group = ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Choose".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                    ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        });
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    Some(&choice_group),
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw choice footer");
+
+        let buffer = terminal.backend().buffer();
+        let footer = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(footer.contains("Esc"));
+        assert!(footer.contains("submit"));
+        assert!(footer.contains("close"));
     }
 
     #[test]
