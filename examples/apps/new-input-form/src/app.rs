@@ -1,5 +1,5 @@
 use crate::agent::{PendingTurn, Session, SessionKind, ModelKind};
-use crate::input_commands::{CommandMode, CommandPicker};
+use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome};
 use crate::ui;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -142,11 +142,13 @@ impl App {
             }
             KeyCode::Enter => {
                 if matches!(self.command_mode, CommandMode::Files | CommandMode::Actions) {
-                    if let Some(picker) = self.command_picker.as_ref() {
-                        picker.accept(&mut self.input);
+                    if let Some(picker) = self.command_picker.as_mut() {
+                        let outcome = picker.activate(&mut self.input);
+                        if matches!(outcome, PickerOutcome::Close) {
+                            self.command_mode = CommandMode::None;
+                            self.command_picker = None;
+                        }
                     }
-                    self.command_mode = CommandMode::None;
-                    self.command_picker = None;
                 } else {
                     let content = self.input.value().trim().to_owned();
                     if !content.is_empty() {

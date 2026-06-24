@@ -26,6 +26,7 @@ pub enum PickerStage {
 pub enum PickerAction {
     EnterFiles,
     EnterFolders,
+    EnterDirectory(PathBuf),
     Insert(String),
 }
 
@@ -36,14 +37,10 @@ pub struct PickerItem {
 }
 
 impl PickerItem {
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
     pub fn value(&self) -> Option<&str> {
         match &self.action {
             PickerAction::Insert(value) => Some(value.as_str()),
-            PickerAction::EnterFiles | PickerAction::EnterFolders => None,
+            PickerAction::EnterFiles | PickerAction::EnterFolders | PickerAction::EnterDirectory(_) => None,
         }
     }
 }
@@ -56,6 +53,12 @@ pub struct CommandPicker {
     pub filter: String,
     pub selected: usize,
     pub items: Vec<PickerItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerOutcome {
+    StayOpen,
+    Close,
 }
 
 impl CommandPicker {
@@ -74,27 +77,16 @@ impl CommandPicker {
     }
 
     pub fn actions() -> Self {
-        Self {
+        let mut picker = Self {
             kind: CommandKind::Actions,
             stage: PickerStage::Root,
             root: PathBuf::new(),
             filter: String::new(),
             selected: 0,
-            items: vec![
-                PickerItem {
-                    label: "/plan".to_string(),
-                    action: PickerAction::Insert("/plan".to_string()),
-                },
-                PickerItem {
-                    label: "/run".to_string(),
-                    action: PickerAction::Insert("/run".to_string()),
-                },
-                PickerItem {
-                    label: "/review".to_string(),
-                    action: PickerAction::Insert("/review".to_string()),
-                },
-            ],
-        }
+            items: Vec::new(),
+        };
+        picker.rebuild_items();
+        picker
     }
 
     pub fn move_up(&mut self) {
@@ -108,12 +100,6 @@ impl CommandPicker {
         }
     }
 
-    pub fn selected_item(&self) -> Option<&str> {
-        self.visible_items()
-            .get(self.selected)
-            .and_then(|item| item.value())
-    }
-
     pub fn prompt(&self) -> &str {
         &self.filter
     }
@@ -121,6 +107,10 @@ impl CommandPicker {
     pub fn push_filter_char(&mut self, ch: char) {
         self.filter.push(ch);
         self.selected = 0;
+        if matches!(self.kind, CommandKind::Files) && matches!(self.stage, PickerStage::Root) {
+            self.stage = PickerStage::Files;
+            self.rebuild_items();
+        }
     }
 
     pub fn pop_filter_char(&mut self) {
@@ -135,12 +125,9 @@ impl CommandPicker {
 
     pub fn visible_items(&self) -> Vec<&PickerItem> {
         if self.filter.is_empty() {
-            return self
-                .items
-                .iter()
-                .filter(|item| self.kind != CommandKind::Files || self.stage == PickerStage::Root || true)
-                .collect();
+            return self.items.iter().collect();
         }
+
         let needle = self.filter.to_lowercase();
         self.items
             .iter()
@@ -148,8 +135,16 @@ impl CommandPicker {
             .collect()
     }
 
+    pub fn selected_item(&self) -> Option<&str> {
+        let visible_items = self.visible_items();
+        visible_items
+            .get(self.selected)
+            .and_then(|item| item.value())
+    }
+
     pub fn activate(&mut self, input: &mut Input) -> PickerOutcome {
-        let Some(item) = self.visible_items().get(self.selected) else {
+        let visible_items = self.visible_items();
+        let Some(item) = visible_items.get(self.selected) else {
             return PickerOutcome::StayOpen;
         };
 
@@ -166,6 +161,13 @@ impl CommandPicker {
                 self.rebuild_items();
                 PickerOutcome::StayOpen
             }
+            PickerAction::EnterDirectory(path) => {
+                self.root = path.clone();
+                self.stage = PickerStage::Folders;
+                self.clear_filter();
+                self.rebuild_items();
+                PickerOutcome::StayOpen
+            }
             PickerAction::Insert(value) => {
                 for ch in value.chars() {
                     input.handle(InputRequest::InsertChar(ch));
@@ -174,13 +176,8 @@ impl CommandPicker {
                     input.handle(InputRequest::InsertChar(' '));
                 }
                 PickerOutcome::Close
-            })
+            }
         }
-    }
-
-    pub fn accept(&self, input: &mut Input) {
-        let mut cloned = self.clone();
-        let _ = cloned.activate(input);
     }
 
     fn rebuild_items(&mut self) {
@@ -197,9 +194,7 @@ impl CommandPicker {
             ],
             (CommandKind::Files, PickerStage::Files) => file_picker_items(&self.root),
             (CommandKind::Files, PickerStage::Folders) => folder_picker_items(&self.root),
-            (CommandKind::Actions, PickerStage::Root)
-            | (CommandKind::Actions, PickerStage::Files)
-            | (CommandKind::Actions, PickerStage::Folders) => vec![
+            (CommandKind::Actions, _) => vec![
                 PickerItem {
                     label: "/plan".to_string(),
                     action: PickerAction::Insert("/plan".to_string()),
@@ -217,22 +212,8 @@ impl CommandPicker {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerOutcome {
-    StayOpen,
-    Close,
-}
-
 fn file_picker_items(root: &Path) -> Vec<PickerItem> {
-    let files = list_files(root);
-    if files.is_empty() {
-        return vec![PickerItem {
-            label: format!("@{}", root.display()),
-            action: PickerAction::Insert(format!("@{}", root.display())),
-        }];
-    }
-
-    files
+    list_files(root)
         .into_iter()
         .map(|path| {
             let rel = relative_path(root, &path);
@@ -246,22 +227,14 @@ fn file_picker_items(root: &Path) -> Vec<PickerItem> {
 }
 
 fn folder_picker_items(root: &Path) -> Vec<PickerItem> {
-    let folders = list_directories(root);
-    if folders.is_empty() {
-        return vec![PickerItem {
-            label: format!("@{}", root.display()),
-            action: PickerAction::Insert(format!("@{}", root.display())),
-        }];
-    }
-
-    folders
+    list_directories(root)
         .into_iter()
         .map(|path| {
             let rel = relative_path(root, &path);
-            let value = format!("@{}", rel.display());
+            let value = format!("@{}/", rel.display());
             PickerItem {
                 label: value.clone(),
-                action: PickerAction::Insert(value),
+                action: PickerAction::EnterDirectory(path),
             }
         })
         .collect()
@@ -299,8 +272,7 @@ fn collect_directories(root: &Path, folders: &mut Vec<PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                folders.push(path.clone());
-                collect_directories(&path, folders);
+                folders.push(path);
             }
         }
     }
@@ -320,31 +292,92 @@ mod tests {
     use tui_input::Input;
 
     #[test]
-    fn inserts_selected_file_path_into_input() {
-        let picker = CommandPicker {
-            kind: CommandKind::Files,
-            filter: String::new(),
-            selected: 1,
-            items: vec![
-                PickerItem::Entry {
-                    label: "@alpha.rs".to_string(),
-                    value: "@alpha.rs".to_string(),
-                },
-                PickerItem::Entry {
-                    label: "@beta.rs".to_string(),
-                    value: "@beta.rs".to_string(),
-                },
-            ],
-        };
-        let mut input = Input::default();
+    fn root_files_picker_offers_two_choices() {
+        let picker = CommandPicker::files("/workspace");
 
-        picker.accept(&mut input);
-
-        assert_eq!(input.value(), "@beta.rs");
+        assert_eq!(picker.kind, CommandKind::Files);
+        assert_eq!(picker.stage, PickerStage::Root);
+        assert_eq!(picker.items.len(), 2);
+        assert_eq!(picker.items[0].label, "files");
+        assert_eq!(picker.items[1].label, "文件夹");
     }
 
     #[test]
-    fn list_files_recursively_finds_nested_files() {
+    fn selecting_files_stage_lists_current_path_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("new-input-form-stage-{unique}"));
+        fs::create_dir_all(&root).expect("create root dir");
+        fs::write(root.join("alpha.rs"), "alpha").expect("write alpha");
+        fs::write(root.join("beta.rs"), "beta").expect("write beta");
+
+        let mut picker = CommandPicker::files(&root);
+        let mut input = Input::default();
+
+        let outcome = picker.activate(&mut input);
+        assert_eq!(outcome, PickerOutcome::StayOpen);
+        assert_eq!(picker.stage, PickerStage::Files);
+        assert!(picker.items.iter().all(|item| item.label.starts_with('@')));
+        assert!(picker.items.iter().any(|item| item.label == "@alpha.rs"));
+        assert!(picker.items.iter().any(|item| item.label == "@beta.rs"));
+    }
+
+    #[test]
+    fn typing_into_root_files_picker_enters_files_stage() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("new-input-form-filter-{unique}"));
+        fs::create_dir_all(&root).expect("create root dir");
+        fs::write(root.join("l1.rs"), "l1").expect("write l1");
+        fs::write(root.join("x.rs"), "x").expect("write x");
+
+        let mut picker = CommandPicker::files(&root);
+        picker.push_filter_char('l');
+
+        assert_eq!(picker.stage, PickerStage::Files);
+        assert!(picker.visible_items().iter().any(|item| item.label == "@l1.rs"));
+        assert!(picker.visible_items().iter().all(|item| item.label.starts_with('@')));
+    }
+
+    #[test]
+    fn selecting_folder_stage_enters_nested_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("new-input-form-folder-{unique}"));
+        let nested = root.join("nested");
+        let child = nested.join("child");
+        fs::create_dir_all(&child).expect("create child dir");
+
+        let mut picker = CommandPicker::files(&root);
+        let mut input = Input::default();
+
+        assert!(matches!(picker.activate(&mut input), PickerOutcome::StayOpen));
+        assert_eq!(picker.stage, PickerStage::Files);
+
+        picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: PickerStage::Folders,
+            root: root.clone(),
+            filter: String::new(),
+            selected: 0,
+            items: folder_picker_items(&root),
+        };
+
+        let outcome = picker.activate(&mut input);
+        assert_eq!(outcome, PickerOutcome::StayOpen);
+        assert_eq!(picker.stage, PickerStage::Folders);
+        assert_eq!(picker.root, nested);
+        assert!(picker.items.iter().any(|item| item.label == "@child/"));
+    }
+
+    #[test]
+    fn entering_files_stage_lists_matching_files() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock before unix epoch")
@@ -355,127 +388,36 @@ mod tests {
         fs::write(root.join("alpha.rs"), "alpha").expect("write alpha");
         fs::write(nested.join("beta.rs"), "beta").expect("write beta");
 
-        let files = list_files(&root);
+        let mut picker = CommandPicker::files(&root);
+        let mut input = Input::default();
 
-        assert!(files.iter().any(|path| path.ends_with("alpha.rs")));
-        assert!(files
+        assert!(matches!(picker.items[0].action, PickerAction::EnterFiles));
+        picker.activate(&mut input);
+
+        assert_eq!(picker.stage, PickerStage::Files);
+        assert!(picker
+            .items
             .iter()
-            .any(|path| path.ends_with("nested\\beta.rs") || path.ends_with("nested/beta.rs")));
+            .any(|item| item.label == "@alpha.rs" || item.label == "@nested/beta.rs"));
     }
 
     #[test]
-    fn inserts_selected_action_into_input() {
+    fn files_are_inserted_into_input() {
         let picker = CommandPicker {
-            kind: CommandKind::Actions,
+            kind: CommandKind::Files,
+            stage: PickerStage::Files,
+            root: PathBuf::new(),
             filter: String::new(),
-            selected: 1,
-            items: vec![
-                PickerItem::Entry {
-                    label: "/plan".to_string(),
-                    value: "/plan".to_string(),
-                },
-                PickerItem::Entry {
-                    label: "/run".to_string(),
-                    value: "/run".to_string(),
-                },
-                PickerItem::Entry {
-                    label: "/review".to_string(),
-                    value: "/review".to_string(),
-                },
-            ],
+            selected: 0,
+            items: vec![PickerItem {
+                label: "@alpha.rs".to_string(),
+                action: PickerAction::Insert("@alpha.rs".to_string()),
+            }],
         };
         let mut input = Input::default();
 
-        picker.accept(&mut input);
-
-        assert_eq!(input.value(), "/run ");
-    }
-
-    #[test]
-    fn filters_visible_items_by_query() {
-        let mut picker = CommandPicker {
-            kind: CommandKind::Files,
-            filter: String::new(),
-            selected: 0,
-            items: vec![
-                PickerItem::Entry {
-                    label: "@alpha.rs".to_string(),
-                    value: "@alpha.rs".to_string(),
-                },
-                PickerItem::Section("src".to_string()),
-                PickerItem::Entry {
-                    label: "@src/main.rs".to_string(),
-                    value: "@src/main.rs".to_string(),
-                },
-                PickerItem::Entry {
-                    label: "@src/ui.rs".to_string(),
-                    value: "@src/ui.rs".to_string(),
-                },
-            ],
-        };
-
-        picker.push_filter_char('s');
-        picker.push_filter_char('r');
-        picker.push_filter_char('c');
-
-        assert_eq!(picker.visible_items(), vec!["@src/main.rs", "@src/ui.rs"]);
-    }
-
-    #[test]
-    fn empty_filter_results_in_empty_visible_items() {
-        let mut picker = CommandPicker {
-            kind: CommandKind::Actions,
-            filter: String::new(),
-            selected: 0,
-            items: vec![
-                PickerItem::Entry {
-                    label: "/plan".to_string(),
-                    value: "/plan".to_string(),
-                },
-                PickerItem::Entry {
-                    label: "/run".to_string(),
-                    value: "/run".to_string(),
-                },
-            ],
-        };
-
-        picker.push_filter_char('z');
-
-        assert!(picker.visible_items().is_empty());
-        assert_eq!(picker.selected_item(), None);
-    }
-
-    #[test]
-    fn files_use_relative_paths_when_possible() {
-        let root = PathBuf::from("/workspace");
-        let path = PathBuf::from("/workspace/src/main.rs");
-
-        let rel = relative_path(&root, &path);
-
-        assert_eq!(rel, PathBuf::from("src/main.rs"));
-    }
-
-    #[test]
-    fn file_picker_items_include_recent_and_group_sections() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("new-input-form-picker-{unique}"));
-        let src = root.join("src");
-        let docs = root.join("docs");
-        fs::create_dir_all(&src).expect("create src dir");
-        fs::create_dir_all(&docs).expect("create docs dir");
-        fs::write(root.join("alpha.rs"), "alpha").expect("write alpha");
-        fs::write(src.join("beta.rs"), "beta").expect("write beta");
-        fs::write(docs.join("gamma.md"), "gamma").expect("write gamma");
-
-        let items = file_picker_items(&root);
-
-        assert!(items.iter().any(|item| matches!(item, PickerItem::Section(name) if name == "recent")));
-        assert!(items.iter().any(|item| matches!(item, PickerItem::Section(name) if name == "all files")));
-        assert!(items.iter().any(|item| matches!(item, PickerItem::Section(name) if name == "src")));
-        assert!(items.iter().any(|item| matches!(item, PickerItem::Section(name) if name == "docs")));
-        assert!(items.iter().any(|item| matches!(item, PickerItem::Entry { value, .. } if value == "@alpha.rs")));
+        let mut picker = picker;
+        assert!(matches!(picker.activate(&mut input), PickerOutcome::Close));
+        assert_eq!(input.value(), "@alpha.rs");
     }
 }

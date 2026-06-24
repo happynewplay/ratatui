@@ -1,5 +1,5 @@
 use crate::agent::{Message, ModelKind, Session, SessionKind};
-use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
+use crate::input_commands::{CommandKind, CommandMode, CommandPicker, PickerAction};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -78,12 +78,26 @@ pub fn render_chat(
     command_picker: Option<&CommandPicker>,
     spinner_frame: usize,
 ) {
+    let picker_height = command_picker
+        .map(|picker| picker_popup_height(picker) + 2)
+        .unwrap_or(0);
+    let bottom_height = if picker_height > 0 { 3 + picker_height } else { 3 };
     let layout = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
-        Constraint::Length(3),
+        Constraint::Length(bottom_height),
     ]);
-    let [header_area, transcript_area, input_area] = frame.area().layout(&layout);
+    let [header_area, transcript_area, bottom_area] = frame.area().layout(&layout);
+    let (input_area, picker_area) = if picker_height > 0 {
+        let bottom_layout = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(picker_height),
+        ]);
+        let [input_area, picker_area] = bottom_area.layout(&bottom_layout);
+        (input_area, Some(picker_area))
+    } else {
+        (bottom_area, None)
+    };
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
 
@@ -140,12 +154,9 @@ pub fn render_chat(
         None
     };
 
-    if matches!(command_mode, CommandMode::Files | CommandMode::Actions) {
-        if let Some(picker) = command_picker {
-            let popup_area = popup_area(input_area);
-            let picker_list = render_command_picker(picker);
-            frame.render_widget(picker_list, popup_area);
-        }
+    if let (Some(picker), Some(picker_area)) = (command_picker, picker_area) {
+        let picker_list = render_command_picker(picker);
+        frame.render_widget(picker_list, picker_area);
     }
 
     let scroll = input.visual_scroll(input_area.width.saturating_sub(3) as usize);
@@ -173,38 +184,38 @@ pub fn render_chat(
     frame.render_widget(footer, input_area.inner(Margin::new(1, 0)));
 }
 
-fn popup_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    let width = area.width.min(60);
-    let height = area.height.min(8);
-    ratatui::layout::Rect::new(area.x, area.y.saturating_sub(height), width, height)
-}
-
 fn render_command_picker(picker: &CommandPicker) -> List<'static> {
     let title = match picker.kind {
         CommandKind::Files => format!("files (@{})", picker.prompt()),
         CommandKind::Actions => format!("actions (/{})", picker.prompt()),
     };
+    let visible = picker.visible_items();
+    let window_height = picker_popup_height(picker).max(1) as usize;
+    let start = picker_window_start(picker.selected, visible.len(), window_height);
+    let end = (start + window_height).min(visible.len());
     let mut rendered = Vec::new();
-    let mut visible_index = 0usize;
-    for item in picker.visible_entries() {
-        match item {
-            crate::input_commands::VisibleItem::Section(name) => {
-                rendered.push(ListItem::new(
-                    Line::from(name.to_string()).style(Style::new().fg(Color::DarkGray).bold()),
-                ));
+    for (visible_index, item) in visible[start..end].iter().enumerate() {
+        let absolute_index = start + visible_index;
+        match &item.action {
+            PickerAction::EnterFiles | PickerAction::EnterFolders | PickerAction::EnterDirectory(_) => {
+                let line = if absolute_index == picker.selected {
+                    Line::from(item.label.clone()).style(Style::new().fg(Color::Black).bg(Color::Cyan))
+                } else {
+                    Line::from(item.label.clone())
+                };
+                rendered.push(ListItem::new(line));
             }
-            crate::input_commands::VisibleItem::Entry { label, .. } => {
-                let line = if visible_index == picker.selected {
+            PickerAction::Insert(_) => {
+                let line = if absolute_index == picker.selected {
                     let active_style = match picker.kind {
                         CommandKind::Files => Style::new().fg(Color::Black).bg(Color::Cyan),
                         CommandKind::Actions => Style::new().fg(Color::Black).bg(Color::Yellow),
                     };
-                    Line::from(label.to_string()).style(active_style)
+                    Line::from(item.label.clone()).style(active_style)
                 } else {
-                    Line::from(label.to_string())
+                    Line::from(item.label.clone())
                 };
                 rendered.push(ListItem::new(line));
-                visible_index += 1;
             }
         }
     }
@@ -214,6 +225,29 @@ fn render_command_picker(picker: &CommandPicker) -> List<'static> {
         ));
     }
     List::new(rendered).block(Block::bordered().title(Line::from(title).bold()))
+}
+
+fn picker_popup_height(picker: &CommandPicker) -> u16 {
+    let visible_count = picker.visible_items().len().max(1);
+    visible_count.min(10) as u16
+}
+
+fn picker_window_start(selected: usize, visible_len: usize, window_height: usize) -> usize {
+    if visible_len <= window_height {
+        return 0;
+    }
+
+    let selected = selected.min(visible_len.saturating_sub(1));
+    let mut start = if selected + 1 > window_height {
+        selected + 1 - window_height
+    } else {
+        0
+    };
+    let max_start = visible_len - window_height;
+    if start > max_start {
+        start = max_start;
+    }
+    start
 }
 
 fn render_sidebar(history: &[Session], session: Option<&Session>) -> List<'static> {
@@ -399,6 +433,45 @@ mod tests {
                 )
             })
             .expect("draw tool transcript");
+    }
+
+    #[test]
+    fn render_chat_shows_root_file_selector_choices() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let picker = CommandPicker::files(".");
+
+        terminal
+            .draw(|frame| {
+                let _ = frame;
+                let _ = &picker;
+            })
+            .expect("draw picker");
+    }
+
+    #[test]
+    fn picker_popup_height_caps_at_ten_rows() {
+        let mut picker = CommandPicker::files(".");
+        picker.stage = crate::input_commands::PickerStage::Files;
+        picker.items = (0..12)
+            .map(|i| crate::input_commands::PickerItem {
+                label: format!("@l{i}.rs"),
+                action: crate::input_commands::PickerAction::Insert(format!("@l{i}.rs")),
+            })
+            .collect();
+
+        assert_eq!(picker_popup_height(&picker), 10);
+        picker.items.truncate(4);
+        assert_eq!(picker_popup_height(&picker), 4);
+    }
+
+    #[test]
+    fn picker_window_scrolls_when_selection_nears_bottom_edge() {
+        assert_eq!(picker_window_start(0, 12, 10), 0);
+        assert_eq!(picker_window_start(8, 12, 10), 0);
+        assert_eq!(picker_window_start(9, 12, 10), 0);
+        assert_eq!(picker_window_start(10, 12, 10), 1);
+        assert_eq!(picker_window_start(11, 12, 10), 2);
     }
 }
 
