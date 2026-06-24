@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Planner,
@@ -112,11 +114,225 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChoiceMode {
+    Single,
+    Multi,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceQuestion {
+    pub id: String,
+    pub mode: ChoiceMode,
+    pub prompt: String,
+    pub options: Vec<ChoiceOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceGroupBlock {
+    pub title: String,
+    pub questions: Vec<ChoiceQuestion>,
+    pub submit_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AssistantPayload {
+    ChoiceGroup(ChoiceGroupBlock),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    Question { question_index: usize, option_index: usize },
+    Submit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceGroupState {
+    pub block: ChoiceGroupBlock,
+    pub focus: FocusTarget,
+    pub selected: Vec<Vec<bool>>,
+}
+
+pub fn parse_choice_group_payload(content: &str) -> Option<ChoiceGroupBlock> {
+    serde_json::from_str::<AssistantPayload>(content)
+        .ok()
+        .and_then(|payload| match payload {
+            AssistantPayload::ChoiceGroup(block) => Some(block),
+        })
+}
+
+pub fn serialize_choice_answers(answers: &[(String, Vec<String>)]) -> String {
+    #[derive(Serialize)]
+    struct Answer<'a> {
+        question_id: &'a str,
+        selected_ids: &'a [String],
+    }
+
+    #[derive(Serialize)]
+    struct Submission<'a> {
+        answers: Vec<Answer<'a>>,
+    }
+
+    let answers = answers
+        .iter()
+        .map(|(question_id, selected_ids)| Answer {
+            question_id: question_id.as_str(),
+            selected_ids,
+        })
+        .collect();
+    serde_json::to_string(&Submission { answers }).unwrap_or_else(|_| "{}".to_string())
+}
+
+impl ChoiceGroupState {
+    pub fn new(block: ChoiceGroupBlock) -> Self {
+        let selected: Vec<Vec<bool>> = block
+            .questions
+            .iter()
+            .map(|question| vec![false; question.options.len()])
+            .collect();
+        Self {
+            block,
+            focus: if selected.is_empty() {
+                FocusTarget::Submit
+            } else {
+                FocusTarget::Question {
+                    question_index: 0,
+                    option_index: 0,
+                }
+            },
+            selected,
+        }
+    }
+
+    pub fn selected_answers(&self) -> Vec<(String, Vec<String>)> {
+        self.block
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(question_index, question)| {
+                let selected = self.selected[question_index]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(option_index, checked)| {
+                        checked.then(|| question.options[option_index].id.clone())
+                    })
+                    .collect();
+                (question.id.clone(), selected)
+            })
+            .collect()
+    }
+
+    pub fn question_count(&self) -> usize {
+        self.block.questions.len()
+    }
+
+    pub fn option_count(&self, question_index: usize) -> usize {
+        self.block.questions[question_index].options.len()
+    }
+
+    pub fn move_focus_down(&mut self) {
+        self.focus = match self.focus {
+            FocusTarget::Question { question_index, option_index } => {
+                let option_count = self.option_count(question_index);
+                if option_index + 1 < option_count {
+                    FocusTarget::Question {
+                        question_index,
+                        option_index: option_index + 1,
+                    }
+                } else if question_index + 1 < self.question_count() {
+                    FocusTarget::Question {
+                        question_index: question_index + 1,
+                        option_index: 0,
+                    }
+                } else {
+                    FocusTarget::Submit
+                }
+            }
+            FocusTarget::Submit => {
+                if self.question_count() == 0 {
+                    FocusTarget::Submit
+                } else {
+                    let last_question = self.question_count() - 1;
+                    FocusTarget::Question {
+                        question_index: last_question,
+                        option_index: self.option_count(last_question).saturating_sub(1),
+                    }
+                }
+            }
+        };
+    }
+
+    pub fn move_focus_up(&mut self) {
+        self.focus = match self.focus {
+            FocusTarget::Question { question_index, option_index } => {
+                if option_index > 0 {
+                    FocusTarget::Question {
+                        question_index,
+                        option_index: option_index - 1,
+                    }
+                } else if question_index == 0 {
+                    FocusTarget::Submit
+                } else {
+                    let prev_question = question_index - 1;
+                    let last_option = self.option_count(prev_question).saturating_sub(1);
+                    FocusTarget::Question {
+                        question_index: prev_question,
+                        option_index: last_option,
+                    }
+                }
+            }
+            FocusTarget::Submit => {
+                let last_question = self.question_count().saturating_sub(1);
+                let last_option = self.option_count(last_question).saturating_sub(1);
+                if self.question_count() == 0 {
+                    FocusTarget::Submit
+                } else {
+                    FocusTarget::Question {
+                        question_index: last_question,
+                        option_index: last_option,
+                    }
+                }
+            }
+        };
+    }
+
+    pub fn toggle_selected(&mut self, question_index: usize, option_index: usize) {
+        let Some(question) = self.block.questions.get(question_index) else {
+            return;
+        };
+        let Some(row) = self.selected.get_mut(question_index) else {
+            return;
+        };
+        if option_index >= row.len() {
+            return;
+        }
+        match question.mode {
+            ChoiceMode::Single => {
+                for value in row.iter_mut() {
+                    *value = false;
+                }
+                row[option_index] = true;
+            }
+            ChoiceMode::Multi => {
+                row[option_index] = !row[option_index];
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub kind: SessionKind,
     pub model: ModelKind,
     pub messages: Vec<Message>,
+    pending_choice_group: Option<ChoiceGroupBlock>,
 }
 
 impl Session {
@@ -125,6 +341,7 @@ impl Session {
             kind,
             model,
             messages: vec![],
+            pending_choice_group: None,
         };
         session.messages.push(Message::system(format!(
             "Session started in {} mode using {}.",
@@ -141,6 +358,9 @@ impl Session {
         }
 
         let action = turn_action_for(input, self.kind, self.model);
+        if let TurnAction::ChoicePrompt { subject } = &action {
+            self.pending_choice_group = Some(choice_group_block(subject, self.kind, self.model));
+        }
         let assistant_text = action.assistant_text(self.kind, self.model);
         let chunks = chunk_text(&assistant_text);
 
@@ -166,6 +386,14 @@ impl Session {
             shell_running_emitted: false,
             interrupt_requested: false,
         })
+    }
+
+    pub fn queue_choice_group(&mut self, block: ChoiceGroupBlock) {
+        self.pending_choice_group = Some(block);
+    }
+
+    pub fn take_pending_choice_group(&mut self) -> Option<ChoiceGroupBlock> {
+        self.pending_choice_group.take()
     }
 }
 
@@ -236,6 +464,15 @@ impl PendingTurn {
                     lines.push("- finalizing plan".to_string());
                 }
             }
+            TurnAction::ChoicePrompt { subject } => {
+                lines.push(format!("- preparing choices for {subject}"));
+                if stage > 0 {
+                    lines.push("- drafting available options".to_string());
+                }
+                if shell_result_ready {
+                    lines.push("- finalizing choice prompt".to_string());
+                }
+            }
         }
         lines.join("\n")
     }
@@ -275,7 +512,9 @@ impl PendingTurn {
                         self.shell_job = Some(CommandExecution::spawn(command.clone()));
                     }
                 }
-                TurnAction::ReviewDiff { .. } | TurnAction::BuildPlan { .. } => {}
+                TurnAction::ReviewDiff { .. }
+                | TurnAction::BuildPlan { .. }
+                | TurnAction::ChoicePrompt { .. } => {}
             }
             self.stage += 1;
             return false;
@@ -325,7 +564,9 @@ impl PendingTurn {
                     self.stage += 1;
                     return true;
                 }
-                _ => {
+                TurnAction::ReviewDiff { .. }
+                | TurnAction::BuildPlan { .. }
+                | TurnAction::ChoicePrompt { .. } => {
                     session.messages
                         .push(Message::assistant(self.action.final_message(None)));
                     self.update_thinking_message(session);
@@ -353,6 +594,7 @@ enum TurnAction {
     ShellCommand { command: String },
     ReviewDiff { target: String },
     BuildPlan { subject: String },
+    ChoicePrompt { subject: String },
 }
 
 impl TurnAction {
@@ -376,6 +618,12 @@ impl TurnAction {
                 model.label(),
                 subject
             ),
+            Self::ChoicePrompt { subject } => format!(
+                "{} mode on {} is preparing a choice prompt for {}.",
+                kind.label(),
+                model.label(),
+                subject
+            ),
         }
     }
 
@@ -384,6 +632,7 @@ impl TurnAction {
             Self::ShellCommand { command } => format!("tool: shell_command -> {command}"),
             Self::ReviewDiff { target } => format!("tool: code_review -> {target}"),
             Self::BuildPlan { subject } => format!("tool: planner -> {subject}"),
+            Self::ChoicePrompt { subject } => format!("tool: choice_prompt -> {subject}"),
         }
     }
 
@@ -392,6 +641,7 @@ impl TurnAction {
             Self::ShellCommand { command } => format!("tool: shell_command running -> {command}"),
             Self::ReviewDiff { target } => format!("tool: code_review running -> {target}"),
             Self::BuildPlan { subject } => format!("tool: planner running -> {subject}"),
+            Self::ChoicePrompt { subject } => format!("tool: choice_prompt running -> {subject}"),
         }
     }
 
@@ -415,6 +665,7 @@ impl TurnAction {
             }
             Self::ReviewDiff { target } => format!("assistant: review notes recorded for {target}."),
             Self::BuildPlan { subject } => format!("assistant: plan drafted for {subject}."),
+            Self::ChoicePrompt { subject } => format!("assistant: choice prompt ready for {subject}."),
         }
     }
 }
@@ -549,6 +800,9 @@ fn turn_action_for(input: &str, kind: SessionKind, model: ModelKind) -> TurnActi
     if let Some(command) = shell_command_from_input(input) {
         return TurnAction::ShellCommand { command };
     }
+    if let Some(subject) = choice_command_from_input(input) {
+        return TurnAction::ChoicePrompt { subject };
+    }
 
     let lowered = input.to_ascii_lowercase();
     if lowered.starts_with("/review") || lowered.contains("review") || lowered.contains("diff") {
@@ -577,6 +831,52 @@ fn shell_command_from_input(input: &str) -> Option<String> {
         Some(rest.trim_start().to_string())
     } else {
         None
+    }
+}
+
+fn choice_command_from_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed == "/choice" {
+        return Some("the current task".to_string());
+    }
+    let rest = trimmed.strip_prefix("/choice")?;
+    if rest.starts_with(char::is_whitespace) {
+        let subject = rest.trim_start();
+        Some(if subject.is_empty() {
+            "the current task".to_string()
+        } else {
+            subject.to_string()
+        })
+    } else {
+        None
+    }
+}
+
+fn choice_group_block(subject: &str, kind: SessionKind, model: ModelKind) -> ChoiceGroupBlock {
+    ChoiceGroupBlock {
+        title: format!("Choose next step for {subject}"),
+        submit_label: "Submit".to_string(),
+        questions: vec![
+            ChoiceQuestion {
+                id: "scope".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: format!("What should {} on {} focus on?", kind.label(), model.label()),
+                options: vec![
+                    ChoiceOption { id: "files".to_string(), label: "Files".to_string() },
+                    ChoiceOption { id: "folders".to_string(), label: "Folders".to_string() },
+                ],
+            },
+            ChoiceQuestion {
+                id: "actions".to_string(),
+                mode: ChoiceMode::Multi,
+                prompt: "Which actions should be included?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "plan".to_string(), label: "Plan".to_string() },
+                    ChoiceOption { id: "review".to_string(), label: "Review".to_string() },
+                    ChoiceOption { id: "shell".to_string(), label: "Shell".to_string() },
+                ],
+            },
+        ],
     }
 }
 
@@ -655,6 +955,123 @@ mod tests {
         let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
 
         assert!(session.begin_turn("   ").is_none());
+    }
+
+    #[test]
+    fn choice_group_state_starts_unselected_and_submit_is_last() {
+        let block = ChoiceGroupBlock {
+            title: "Pick targets".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "scope".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Scope?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "files".to_string(), label: "Files".to_string() },
+                    ChoiceOption { id: "folders".to_string(), label: "Folders".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        };
+
+        let state = ChoiceGroupState::new(block);
+        assert!(state.selected_answers().iter().all(|(_, selected)| selected.is_empty()));
+        assert_eq!(state.focus, FocusTarget::Submit);
+    }
+
+    #[test]
+    fn choice_group_state_moves_focus_and_toggles_selection() {
+        let block = ChoiceGroupBlock {
+            title: "Choose".to_string(),
+            questions: vec![
+                ChoiceQuestion {
+                    id: "mode".to_string(),
+                    mode: ChoiceMode::Single,
+                    prompt: "Mode?".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                        ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                    ],
+                },
+                ChoiceQuestion {
+                    id: "tags".to_string(),
+                    mode: ChoiceMode::Multi,
+                    prompt: "Tags?".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "one".to_string(), label: "One".to_string() },
+                        ChoiceOption { id: "two".to_string(), label: "Two".to_string() },
+                    ],
+                },
+            ],
+            submit_label: "Submit".to_string(),
+        };
+
+        let mut state = ChoiceGroupState::new(block);
+        state.move_focus_up();
+        assert_eq!(
+            state.focus,
+            FocusTarget::Question {
+                question_index: 1,
+                option_index: 1,
+            }
+        );
+        state.move_focus_up();
+        assert_eq!(
+            state.focus,
+            FocusTarget::Question {
+                question_index: 1,
+                option_index: 0,
+            }
+        );
+        state.toggle_selected(0, 1);
+        state.toggle_selected(1, 0);
+        state.toggle_selected(1, 1);
+
+        assert_eq!(
+            state.selected_answers(),
+            vec![
+                ("mode".to_string(), vec!["safe".to_string()]),
+                ("tags".to_string(), vec!["one".to_string(), "two".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn choice_group_payload_round_trips() {
+        let json = r#"{
+            "type":"choice_group",
+            "title":"Pick",
+            "submit_label":"Submit",
+            "questions":[
+                {
+                    "id":"scope",
+                    "mode":"Single",
+                    "prompt":"Scope?",
+                    "options":[
+                        {"id":"files","label":"Files"},
+                        {"id":"folders","label":"Folders"}
+                    ]
+                }
+            ]
+        }"#;
+
+        let block = parse_choice_group_payload(json).expect("parse choice block");
+        assert_eq!(block.title, "Pick");
+        assert_eq!(block.submit_label, "Submit");
+        assert_eq!(block.questions.len(), 1);
+        assert_eq!(block.questions[0].id, "scope");
+        assert_eq!(block.questions[0].options[0].id, "files");
+    }
+
+    #[test]
+    fn choice_answers_are_serialized_as_json() {
+        let payload = serialize_choice_answers(&[(
+            "scope".to_string(),
+            vec!["src/main.rs".to_string(), "src/ui.rs".to_string()],
+        )]);
+
+        assert!(payload.contains("\"answers\""));
+        assert!(payload.contains("\"scope\""));
+        assert!(payload.contains("src/main.rs"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::agent::{PendingTurn, Session, SessionKind, ModelKind};
+use crate::agent::{ChoiceGroupState, FocusTarget, PendingTurn, Session, SessionKind, ModelKind};
 use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome};
 use crate::ui;
 use color_eyre::Result;
@@ -27,6 +27,7 @@ pub struct App {
     active_turn: Option<PendingTurn>,
     command_mode: CommandMode,
     command_picker: Option<CommandPicker>,
+    choice_group: Option<ChoiceGroupState>,
     follow_transcript: bool,
     transcript_scroll: usize,
 }
@@ -44,6 +45,7 @@ impl Default for App {
             active_turn: None,
             command_mode: CommandMode::None,
             command_picker: None,
+            choice_group: None,
             follow_transcript: true,
             transcript_scroll: 0,
         }
@@ -144,11 +146,48 @@ impl App {
     fn handle_chat(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') => return true,
-            KeyCode::Up | KeyCode::Char('k') if self.command_picker.is_none() => {
+            KeyCode::Up | KeyCode::Char('k') if self.choice_group.is_some() => {
+                if let Some(choice_group) = self.choice_group.as_mut() {
+                    choice_group.move_focus_up();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.choice_group.is_some() => {
+                if let Some(choice_group) = self.choice_group.as_mut() {
+                    choice_group.move_focus_down();
+                }
+            }
+            KeyCode::Char(' ') if self.choice_group.is_some() => {
+                if let Some(choice_group) = self.choice_group.as_mut() {
+                    if let FocusTarget::Question {
+                        question_index,
+                        option_index,
+                    } = choice_group.focus
+                    {
+                        choice_group.toggle_selected(question_index, option_index);
+                    }
+                }
+            }
+            KeyCode::Enter if self.choice_group.is_some() => {
+                if let Some(choice_group) = self.choice_group.as_ref() {
+                    if matches!(choice_group.focus, FocusTarget::Submit) {
+                        let answers = choice_group.selected_answers();
+                        let payload = crate::agent::serialize_choice_answers(&answers);
+                        if let Some(session) = self.current_session.as_mut() {
+                            session.messages.push(crate::agent::Message::user(payload));
+                        }
+                        self.choice_group = None;
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if self.command_picker.is_none() && self.choice_group.is_none() =>
+            {
                 self.follow_transcript = false;
                 self.transcript_scroll = self.transcript_scroll.saturating_add(1);
             }
-            KeyCode::Down | KeyCode::Char('j') if self.command_picker.is_none() => {
+            KeyCode::Down | KeyCode::Char('j')
+                if self.command_picker.is_none() && self.choice_group.is_none() =>
+            {
                 self.follow_transcript = false;
                 self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
             }
@@ -175,7 +214,7 @@ impl App {
                 self.command_mode = CommandMode::Actions;
                 self.command_picker = Some(CommandPicker::actions());
             }
-            KeyCode::Enter => {
+            KeyCode::Enter if self.choice_group.is_none() => {
                 if matches!(self.command_mode, CommandMode::Files | CommandMode::Actions) {
                     if let Some(picker) = self.command_picker.as_mut() {
                         let outcome = picker.activate(&mut self.input);
@@ -235,6 +274,11 @@ impl App {
             return;
         };
         if turn.tick(session) {
+            if self.choice_group.is_none() {
+                if let Some(choice_group) = session.take_pending_choice_group() {
+                    self.choice_group = Some(crate::agent::ChoiceGroupState::new(choice_group));
+                }
+            }
             self.history.push(session.clone());
             self.active_turn = None;
         }
@@ -251,6 +295,7 @@ impl App {
                 &self.input,
                 self.command_mode,
                 self.command_picker.as_ref(),
+                self.choice_group.as_ref(),
                 self.spinner_frame,
                 self.follow_transcript,
                 self.transcript_scroll,
@@ -266,6 +311,7 @@ fn current_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ChoiceGroupBlock, ChoiceGroupState, ChoiceMode, ChoiceOption, ChoiceQuestion};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     #[test]
@@ -347,5 +393,111 @@ mod tests {
                 .unwrap_or(false),
             "expected ctrl+c to mark the active turn as interrupted"
         );
+    }
+
+    #[test]
+    fn choice_group_submit_only_closes_when_focus_is_on_submit() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Pick".to_string(),
+            questions: vec![
+                ChoiceQuestion {
+                    id: "mode".to_string(),
+                    mode: ChoiceMode::Single,
+                    prompt: "Mode?".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                        ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                    ],
+                },
+                ChoiceQuestion {
+                    id: "tags".to_string(),
+                    mode: ChoiceMode::Multi,
+                    prompt: "Tags?".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "one".to_string(), label: "One".to_string() },
+                        ChoiceOption { id: "two".to_string(), label: "Two".to_string() },
+                    ],
+                },
+            ],
+            submit_label: "Submit".to_string(),
+        }));
+
+        assert!(matches!(
+            app.choice_group.as_ref().unwrap().focus,
+            FocusTarget::Question {
+                question_index: 0,
+                option_index: 0,
+            }
+        ));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(app.choice_group.is_none());
+        assert!(app
+            .current_session
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.content.contains("\"answers\"")));
+        assert!(app
+            .current_session
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.content.contains("\"mode\"")));
+    }
+
+    #[test]
+    fn tick_active_turn_auto_opens_choice_group_from_assistant_payload() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.active_turn = app
+            .current_session
+            .as_mut()
+            .and_then(|session| session.begin_turn("/choice plan the next step"));
+
+        while app.active_turn.is_some() {
+            app.tick_active_turn();
+        }
+
+        assert!(app.choice_group.is_some());
+        assert!(
+            app.current_session
+                .as_mut()
+                .and_then(|session| session.take_pending_choice_group())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tick_active_turn_ignores_non_assistant_choice_payloads() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.active_turn = app
+            .current_session
+            .as_mut()
+            .and_then(|session| session.begin_turn("plan the next step"));
+        if let Some(session) = app.current_session.as_mut() {
+            let _ = session.take_pending_choice_group();
+        }
+
+        while app.active_turn.is_some() {
+            app.tick_active_turn();
+        }
+
+        assert!(app.choice_group.is_none());
     }
 }

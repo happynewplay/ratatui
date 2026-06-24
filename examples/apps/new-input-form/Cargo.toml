@@ -9,6 +9,8 @@ rust-version.workspace = true
 color-eyre.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+serde = { workspace = true, features = ["derive", "alloc"] }
+serde_json = { workspace = true }
 tui-input = { version = "0.15.3", default-features = false, features = ["crossterm"] }
 
 [lints]

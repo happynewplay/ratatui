@@ -1,4 +1,6 @@
-use crate::agent::{Message, ModelKind, Session, SessionKind};
+use crate::agent::{
+    ChoiceGroupState, FocusTarget, Message, ModelKind, Session, SessionKind,
+};
 use crate::input_commands::{CommandKind, CommandMode, CommandPicker, PickerAction};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
@@ -76,29 +78,44 @@ pub fn render_chat(
     input: &Input,
     command_mode: CommandMode,
     command_picker: Option<&CommandPicker>,
+    choice_group: Option<&ChoiceGroupState>,
     spinner_frame: usize,
     follow_transcript: bool,
     transcript_scroll: usize,
 ) {
+    let choice_height = choice_group.map(|group| choice_group_height(group)).unwrap_or(0);
     let picker_height = command_picker
         .map(|picker| picker_popup_height(picker) + 2)
         .unwrap_or(0);
-    let bottom_height = if picker_height > 0 { 3 + picker_height } else { 3 };
+    let bottom_height = if choice_height > 0 {
+        3 + choice_height
+    } else if picker_height > 0 {
+        3 + picker_height
+    } else {
+        3
+    };
     let layout = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(bottom_height),
     ]);
     let [header_area, transcript_area, bottom_area] = frame.area().layout(&layout);
-    let (input_area, picker_area) = if picker_height > 0 {
+    let (input_area, picker_area, choice_area) = if choice_height > 0 {
+        let bottom_layout = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(choice_height),
+        ]);
+        let [input_area, choice_area] = bottom_area.layout(&bottom_layout);
+        (input_area, None, Some(choice_area))
+    } else if picker_height > 0 {
         let bottom_layout = Layout::vertical([
             Constraint::Length(3),
             Constraint::Length(picker_height),
         ]);
         let [input_area, picker_area] = bottom_area.layout(&bottom_layout);
-        (input_area, Some(picker_area))
+        (input_area, Some(picker_area), None)
     } else {
-        (bottom_area, None)
+        (bottom_area, None, None)
     };
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
@@ -178,6 +195,11 @@ pub fn render_chat(
         None
     };
 
+    if let (Some(choice_group), Some(choice_area)) = (choice_group, choice_area) {
+        let choice_widget = render_choice_group(choice_group);
+        frame.render_widget(choice_widget, choice_area);
+    }
+
     if let (Some(picker), Some(picker_area)) = (command_picker, picker_area) {
         let picker_list = render_command_picker(picker);
         frame.render_widget(picker_list, picker_area);
@@ -210,6 +232,67 @@ pub fn render_chat(
     )
     .style(Style::new().dark_gray());
     frame.render_widget(footer, input_area.inner(Margin::new(1, 0)));
+}
+
+fn choice_group_height(state: &ChoiceGroupState) -> u16 {
+    let mut body_height = 2usize;
+    for question in &state.block.questions {
+        body_height += 2;
+        body_height += question.options.len();
+    }
+    body_height += 2;
+    body_height.min(10).max(5) as u16
+}
+
+fn render_choice_group(state: &ChoiceGroupState) -> Paragraph<'static> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(state.block.title.clone()).bold());
+    for (question_index, question) in state.block.questions.iter().enumerate() {
+        let question_focus = matches!(
+            state.focus,
+            FocusTarget::Question {
+                question_index: index,
+                ..
+            } if index == question_index
+        );
+        let focus_style = if question_focus {
+            Style::new().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(question.prompt.clone()).style(focus_style));
+        for (option_index, option) in question.options.iter().enumerate() {
+            let checked = state.selected[question_index][option_index];
+            let marker = if checked { "[x]" } else { "[ ]" };
+            let option_style = if matches!(
+                state.focus,
+                FocusTarget::Question {
+                    question_index: q_index,
+                    option_index: o_index
+                } if q_index == question_index && o_index == option_index
+            ) {
+                Style::new().fg(Color::Black).bg(Color::Yellow)
+            } else if question_focus {
+                Style::new().fg(Color::Yellow)
+            } else {
+                Style::new()
+            };
+            lines.push(
+                Line::from(vec![
+                    Span::from(marker),
+                    Span::from(" "),
+                    Span::from(option.label.clone()),
+                ])
+                .style(option_style),
+            );
+        }
+    }
+    let submit_style = match state.focus {
+        FocusTarget::Submit => Style::new().fg(Color::Black).bg(Color::Green),
+        _ => Style::new().fg(Color::Green),
+    };
+    lines.push(Line::from(state.block.submit_label.clone()).style(submit_style));
+    Paragraph::new(lines).block(Block::bordered().title("Choices"))
 }
 
 fn render_command_picker(picker: &CommandPicker) -> List<'static> {
@@ -409,7 +492,10 @@ fn render_tool_message(message: &Message) -> ListItem<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{Message, ModelKind, Role, Session, SessionKind};
+    use crate::agent::{
+        ChoiceGroupBlock, ChoiceGroupState, ChoiceMode, ChoiceOption, ChoiceQuestion, Message,
+        ModelKind, Role, Session, SessionKind,
+    };
     use ratatui::{backend::TestBackend, Terminal};
     use tui_input::Input;
 
@@ -431,6 +517,7 @@ mod tests {
                     &[],
                     &Input::default(),
                     CommandMode::None,
+                    None,
                     None,
                     1,
                     true,
@@ -459,6 +546,7 @@ mod tests {
                     &Input::default(),
                     CommandMode::None,
                     None,
+                    None,
                     2,
                     true,
                     0,
@@ -486,6 +574,7 @@ mod tests {
                     &Input::default(),
                     CommandMode::None,
                     None,
+                    None,
                     3,
                     true,
                     0,
@@ -510,6 +599,7 @@ mod tests {
                     &[],
                     &Input::default(),
                     CommandMode::None,
+                    None,
                     None,
                     3,
                     true,
@@ -542,6 +632,7 @@ mod tests {
                     &Input::default(),
                     CommandMode::None,
                     None,
+                    None,
                     0,
                     true,
                     0,
@@ -572,6 +663,7 @@ mod tests {
                     &[],
                     &Input::default(),
                     CommandMode::None,
+                    None,
                     None,
                     0,
                     false,
@@ -607,6 +699,7 @@ mod tests {
                     &[],
                     &Input::default(),
                     CommandMode::None,
+                    None,
                     None,
                     0,
                     false,
@@ -654,6 +747,57 @@ mod tests {
                 let _ = &picker;
             })
             .expect("draw picker");
+    }
+
+    #[test]
+    fn render_chat_shows_choice_group_block() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let choice_group = ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Choose".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption {
+                        id: "fast".to_string(),
+                        label: "Fast".to_string(),
+                    },
+                    ChoiceOption {
+                        id: "safe".to_string(),
+                        label: "Safe".to_string(),
+                    },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        });
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    Some(&choice_group),
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw choice group");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Choices"));
+        assert!(rendered.contains("Submit"));
     }
 
     #[test]
@@ -716,6 +860,7 @@ mod tests {
                     &[],
                     &Input::default(),
                     CommandMode::None,
+                    None,
                     None,
                     0,
                     true,
