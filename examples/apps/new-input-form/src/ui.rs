@@ -5,7 +5,7 @@ use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 use tui_input::Input;
 
@@ -82,7 +82,7 @@ pub fn render_chat(
     spinner_frame: usize,
     follow_transcript: bool,
     transcript_scroll: usize,
-) {
+) -> usize {
     let choice_height = choice_group.map(|group| choice_group_height(group)).unwrap_or(0);
     let picker_height = command_picker
         .map(|picker| picker_popup_height(picker) + 2)
@@ -120,14 +120,15 @@ pub fn render_chat(
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
     let transcript_lines = transcript_lines(history, session);
+    let transcript_total_len = transcript_lines.len();
     let transcript_height = transcript_body.height as usize;
     let transcript_window = transcript_height.max(1);
     let transcript_start = if follow_transcript {
-        transcript_lines.len().saturating_sub(transcript_window)
+        transcript_total_len.saturating_sub(transcript_window)
     } else {
-        transcript_scroll.min(transcript_lines.len().saturating_sub(transcript_window))
+        transcript_scroll.min(transcript_total_len.saturating_sub(transcript_window))
     };
-    let transcript_total = transcript_lines.len().max(1);
+    let transcript_total = transcript_total_len.max(1);
     let transcript_position = transcript_start.saturating_add(1).min(transcript_total);
 
     let header = match session {
@@ -144,24 +145,47 @@ pub fn render_chat(
     let sidebar = render_sidebar(history, session);
     frame.render_widget(sidebar, sidebar_area);
 
-    let transcript = List::new(transcript_lines.into_iter().skip(transcript_start).collect::<Vec<_>>()).block(
-        Block::bordered()
-            .title(Line::from(vec![
-                Span::from("Transcript").style(Style::new().bold()),
-                Span::from(" "),
-                Span::from(if follow_transcript {
-                    "auto-follow".to_string()
-                } else {
-                    format!("paused {transcript_position}/{transcript_total}")
-                })
-                .style(if follow_transcript {
-                    Style::new().dark_gray()
-                } else {
-                    Style::new().fg(Color::Yellow)
-                }),
-            ])),
+    let transcript_title = Line::from(vec![
+        Span::from("Transcript").style(Style::new().bold()),
+        Span::from(" "),
+        Span::from(if follow_transcript {
+            "auto-follow".to_string()
+        } else {
+            format!("paused {transcript_position}/{transcript_total}")
+        })
+        .style(if follow_transcript {
+            Style::new().dark_gray()
+        } else {
+            Style::new().fg(Color::Yellow)
+        }),
+    ]);
+    frame.render_widget(Block::bordered().title(transcript_title), transcript_body);
+
+    let transcript_inner = transcript_body.inner(Margin::new(1, 1));
+    let (transcript_content_area, transcript_scrollbar_area) =
+        if transcript_lines.len() > transcript_window {
+            let layout = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]);
+            let [content_area, scrollbar_area] = transcript_inner.layout(&layout);
+            (content_area, Some(scrollbar_area))
+        } else {
+            (transcript_inner, None)
+        };
+
+    let transcript = List::new(
+        transcript_lines
+            .into_iter()
+            .skip(transcript_start)
+            .collect::<Vec<_>>(),
     );
-    frame.render_widget(transcript, transcript_body);
+    frame.render_widget(transcript, transcript_content_area);
+
+    if let Some(scrollbar_area) = transcript_scrollbar_area {
+        let mut scrollbar_state = ScrollbarState::new(transcript_total_len)
+            .position(transcript_start)
+            .viewport_content_length(transcript_window);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 
     let scroll = input.visual_scroll(input_area.width.saturating_sub(3) as usize);
     let input_widget = Paragraph::new(input.value())
@@ -213,6 +237,8 @@ pub fn render_chat(
 
     let footer = build_footer(command_mode, command_picker, choice_group, status);
     frame.render_widget(footer, input_area.inner(Margin::new(1, 0)));
+
+    transcript_total_len.saturating_sub(transcript_window)
 }
 
 fn build_footer(
@@ -542,7 +568,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     Some(&session),
                     &[],
@@ -553,7 +579,7 @@ mod tests {
                     1,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw interrupted session");
     }
@@ -570,7 +596,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     Some(&session),
                     &[],
@@ -581,7 +607,7 @@ mod tests {
                     2,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw running session");
     }
@@ -598,7 +624,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     Some(&session),
                     &[],
@@ -609,7 +635,7 @@ mod tests {
                     3,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw tool transcript");
     }
@@ -624,7 +650,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     Some(&session),
                     &[],
@@ -635,7 +661,7 @@ mod tests {
                     3,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw highlighted states");
 
@@ -656,7 +682,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -667,7 +693,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw chat");
 
@@ -688,7 +714,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -699,7 +725,7 @@ mod tests {
                     0,
                     false,
                     0,
-                )
+                );
             })
             .expect("draw chat");
 
@@ -724,7 +750,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     Some(&session),
                     &[],
@@ -735,7 +761,7 @@ mod tests {
                     0,
                     false,
                     1,
-                )
+                );
             })
             .expect("draw paused transcript");
 
@@ -757,7 +783,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -768,13 +794,13 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw initial chinese input");
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -785,7 +811,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw cleared input");
 
@@ -807,7 +833,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -818,7 +844,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw long chinese input");
 
@@ -840,7 +866,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -851,7 +877,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw long chinese input");
 
@@ -919,7 +945,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -930,7 +956,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw choice group");
 
@@ -1079,13 +1105,50 @@ mod tests {
     }
 
     #[test]
+    fn render_chat_shows_transcript_scrollbar_for_overflowing_content() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        for index in 0..20 {
+            session.messages.push(Message::user(format!("message {index}")));
+        }
+
+        terminal
+            .draw(|frame| {
+                let _ = render_chat(
+                    frame,
+                    Some(&session),
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                );
+            })
+            .expect("draw overflowing transcript");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("message 14"));
+        assert!(rendered.contains("message 17"));
+        assert!(rendered.contains("│"));
+    }
+
+    #[test]
     fn render_chat_footer_mentions_picker_shortcuts() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("create terminal");
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -1096,7 +1159,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw footer");
 
@@ -1130,7 +1193,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_chat(
+                let _ = render_chat(
                     frame,
                     None,
                     &[],
@@ -1141,7 +1204,7 @@ mod tests {
                     0,
                     true,
                     0,
-                )
+                );
             })
             .expect("draw choice footer");
 
@@ -1182,3 +1245,7 @@ fn spinner(frame: usize) -> &'static str {
         _ => "⠸",
     }
 }
+
+
+
+

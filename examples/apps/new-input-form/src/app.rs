@@ -55,7 +55,11 @@ impl Default for App {
 impl App {
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
-            terminal.draw(|frame| self.render(frame))?;
+            let mut max_transcript_scroll = 0;
+            terminal.draw(|frame| {
+                max_transcript_scroll = self.render(frame);
+            })?;
+            self.sync_transcript_scroll(max_transcript_scroll);
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
             if event::poll(Duration::from_millis(50))? {
                 if let Some(event) = Self::read_event()? {
@@ -197,6 +201,22 @@ impl App {
                 self.follow_transcript = false;
                 self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
             }
+            KeyCode::PageUp if self.command_picker.is_none() && self.choice_group.is_none() => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_add(5);
+            }
+            KeyCode::PageDown if self.command_picker.is_none() && self.choice_group.is_none() => {
+                self.follow_transcript = false;
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(5);
+            }
+            KeyCode::Home if self.command_picker.is_none() && self.choice_group.is_none() => {
+                self.follow_transcript = false;
+                self.transcript_scroll = usize::MAX;
+            }
+            KeyCode::End if self.command_picker.is_none() && self.choice_group.is_none() => {
+                self.follow_transcript = true;
+                self.transcript_scroll = 0;
+            }
             KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                 if let Some(turn) = self.active_turn.as_mut() {
                     turn.request_interrupt();
@@ -291,10 +311,16 @@ impl App {
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&self, frame: &mut Frame) -> usize {
         match self.state {
-            AppState::SessionSelect => ui::render_session_select(frame, self.session_index),
-            AppState::ModelSelect => ui::render_model_select(frame, self.session_index, self.model_index),
+            AppState::SessionSelect => {
+                ui::render_session_select(frame, self.session_index);
+                0
+            }
+            AppState::ModelSelect => {
+                ui::render_model_select(frame, self.session_index, self.model_index);
+                0
+            }
             AppState::Chat => ui::render_chat(
                 frame,
                 self.current_session.as_ref(),
@@ -307,6 +333,14 @@ impl App {
                 self.follow_transcript,
                 self.transcript_scroll,
             ),
+        }
+    }
+
+    fn sync_transcript_scroll(&mut self, max_transcript_scroll: usize) {
+        if self.follow_transcript {
+            self.transcript_scroll = 0;
+        } else {
+            self.transcript_scroll = self.transcript_scroll.min(max_transcript_scroll);
         }
     }
 }
@@ -393,6 +427,32 @@ mod tests {
     }
 
     #[test]
+    fn page_up_scrolls_transcript_by_pages() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(!app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 5);
+    }
+
+    #[test]
+    fn end_returns_transcript_to_auto_follow() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.follow_transcript = false;
+        app.transcript_scroll = 7;
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
+    }
+
+    #[test]
     fn mouse_wheel_scrolls_transcript() {
         let mut app = App::default();
         app.state = AppState::Chat;
@@ -435,6 +495,36 @@ mod tests {
 
         assert!(app.follow_transcript);
         assert_eq!(app.transcript_scroll, 0);
+    }
+
+    #[test]
+    fn sync_transcript_scroll_clamps_out_of_range_offsets() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.follow_transcript = false;
+        app.transcript_scroll = 999;
+
+        app.sync_transcript_scroll(12);
+
+        assert_eq!(app.transcript_scroll, 12);
+    }
+
+    #[test]
+    fn mouse_wheel_still_moves_after_transcript_scroll_is_clamped() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.follow_transcript = false;
+        app.transcript_scroll = 999;
+
+        app.sync_transcript_scroll(12);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.transcript_scroll, 11);
     }
 
     #[test]
@@ -724,7 +814,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                crate::ui::render_chat(
+                let _ = crate::ui::render_chat(
                     frame,
                     app.current_session.as_ref(),
                     &app.history,
@@ -735,7 +825,7 @@ mod tests {
                     app.spinner_frame,
                     app.follow_transcript,
                     app.transcript_scroll,
-                )
+                );
             })
             .expect("draw chat");
 
