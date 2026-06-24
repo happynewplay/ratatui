@@ -2075,6 +2075,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "new-input-form"
+version = "0.0.0"
+dependencies = [
+ "color-eyre",
+ "crossterm 0.29.0",
+ "ratatui",
+ "tui-input",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4147,6 +4157,17 @@ dependencies = [
  "target-triple",
  "termcolor",
  "toml",
+]
+
+[[package]]
+name = "tui-input"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bd014a652e31cf25ea68d11b10a7b09549863449b19387505c9933f11eb05fa"
+dependencies = [
+ "crossterm 0.29.0",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
