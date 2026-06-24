@@ -94,6 +94,9 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if self.choice_group.is_some() || self.command_picker.is_some() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.follow_transcript = false;
@@ -367,6 +370,35 @@ mod tests {
 
         assert!(!app.follow_transcript);
         assert_eq!(app.transcript_scroll, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_is_ignored_while_choice_group_is_open() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Pick".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                    ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        }));
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
     }
 
     #[test]

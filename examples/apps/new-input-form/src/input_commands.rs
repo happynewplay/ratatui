@@ -91,13 +91,24 @@ impl CommandPicker {
     }
 
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let visible = self.visible_items();
+        if visible.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        self.selected = self
+            .selected
+            .min(visible.len().saturating_sub(1))
+            .saturating_sub(1);
     }
 
     pub fn move_down(&mut self) {
         let visible = self.visible_items();
-        if !visible.is_empty() {
-            self.selected = (self.selected + 1).min(visible.len().saturating_sub(1));
+        if visible.is_empty() {
+            self.selected = 0;
+        } else {
+            let max = visible.len().saturating_sub(1);
+            self.selected = self.selected.min(max).saturating_add(1).min(max);
         }
     }
 
@@ -112,16 +123,19 @@ impl CommandPicker {
             self.stage = PickerStage::Files;
             self.rebuild_items();
         }
+        self.clamp_selected();
     }
 
     pub fn pop_filter_char(&mut self) {
         self.filter.pop();
         self.selected = 0;
+        self.clamp_selected();
     }
 
     pub fn clear_filter(&mut self) {
         self.filter.clear();
         self.selected = 0;
+        self.clamp_selected();
     }
 
     pub fn visible_items(&self) -> Vec<&PickerItem> {
@@ -152,14 +166,17 @@ impl CommandPicker {
 
     pub fn selected_item(&self) -> Option<&str> {
         let visible_items = self.visible_items();
+        if visible_items.is_empty() {
+            return None;
+        }
         visible_items
-            .get(self.selected)
+            .get(self.selected.min(visible_items.len().saturating_sub(1)))
             .and_then(|item| item.value())
     }
 
     pub fn activate(&mut self, input: &mut Input) -> PickerOutcome {
         let visible_items = self.visible_items();
-        let Some(item) = visible_items.get(self.selected) else {
+        let Some(item) = visible_items.get(self.selected.min(visible_items.len().saturating_sub(1))) else {
             return PickerOutcome::StayOpen;
         };
 
@@ -229,6 +246,16 @@ impl CommandPicker {
                 },
             ],
         };
+        self.clamp_selected();
+    }
+
+    fn clamp_selected(&mut self) {
+        let visible_len = self.visible_items().len();
+        if visible_len == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.min(visible_len.saturating_sub(1));
+        }
     }
 }
 
@@ -505,5 +532,59 @@ mod tests {
         let mut picker = picker;
         assert!(matches!(picker.activate(&mut input), PickerOutcome::Close));
         assert_eq!(input.value(), "@alpha.rs");
+    }
+
+    #[test]
+    fn selected_is_clamped_when_filter_results_shrink() {
+        let mut picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: PickerStage::Files,
+            root: PathBuf::new(),
+            filter: String::new(),
+            selected: 5,
+            items: vec![
+                PickerItem {
+                    label: "alpha.rs".to_string(),
+                    secondary: None,
+                    action: PickerAction::Insert("@alpha.rs".to_string()),
+                },
+                PickerItem {
+                    label: "beta.rs".to_string(),
+                    secondary: None,
+                    action: PickerAction::Insert("@beta.rs".to_string()),
+                },
+            ],
+        };
+
+        picker.push_filter_char('l');
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.selected_item(), Some("@alpha.rs"));
+    }
+
+    #[test]
+    fn move_down_and_up_stay_within_visible_bounds() {
+        let mut picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: PickerStage::Files,
+            root: PathBuf::new(),
+            filter: String::new(),
+            selected: 99,
+            items: (0..3)
+                .map(|index| PickerItem {
+                    label: format!("file{index}.rs"),
+                    secondary: None,
+                    action: PickerAction::Insert(format!("@file{index}.rs")),
+                })
+                .collect(),
+        };
+
+        picker.move_down();
+        assert_eq!(picker.selected, 2);
+        picker.move_up();
+        assert_eq!(picker.selected, 1);
+        picker.move_up();
+        assert_eq!(picker.selected, 0);
+        picker.move_up();
+        assert_eq!(picker.selected, 0);
     }
 }

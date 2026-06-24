@@ -1,7 +1,7 @@
 use crate::agent::{
     ChoiceGroupState, FocusTarget, Message, ModelKind, Session, SessionKind,
 };
-use crate::input_commands::{CommandKind, CommandMode, CommandPicker, PickerAction};
+use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -307,38 +307,11 @@ fn render_command_picker(picker: &CommandPicker) -> List<'static> {
     let mut rendered = Vec::new();
     for (visible_index, item) in visible[start..end].iter().enumerate() {
         let absolute_index = start + visible_index;
-        match &item.action {
-            PickerAction::EnterFiles | PickerAction::EnterFolders | PickerAction::EnterDirectory(_) => {
-                let line = if absolute_index == picker.selected {
-                    Line::from(item.label.clone()).style(Style::new().fg(Color::Black).bg(Color::Cyan))
-                } else {
-                    Line::from(item.label.clone())
-                };
-                rendered.push(ListItem::new(line));
-            }
-            PickerAction::Insert(_) => {
-                let active_style = match picker.kind {
-                    CommandKind::Files => Style::new().fg(Color::Black).bg(Color::Cyan),
-                    CommandKind::Actions => Style::new().fg(Color::Black).bg(Color::Yellow),
-                };
-                let primary = if absolute_index == picker.selected {
-                    Line::from(item.label.clone()).style(active_style)
-                } else {
-                    Line::from(item.label.clone()).style(Style::new().fg(Color::White))
-                };
-                let mut lines = vec![primary];
-                if let Some(secondary) = &item.secondary {
-                    let secondary_line = if absolute_index == picker.selected {
-                        Line::from(format!("  {secondary}"))
-                            .style(active_style.patch(Style::new().dark_gray()))
-                    } else {
-                        Line::from(format!("  {secondary}")).style(Style::new().dark_gray())
-                    };
-                    lines.push(secondary_line);
-                }
-                rendered.push(ListItem::new(lines));
-            }
-        }
+        rendered.push(render_picker_item(
+            item,
+            absolute_index == picker.selected,
+            picker.kind,
+        ));
     }
     if rendered.is_empty() {
         rendered.push(ListItem::new(
@@ -346,6 +319,32 @@ fn render_command_picker(picker: &CommandPicker) -> List<'static> {
         ));
     }
     List::new(rendered).block(Block::bordered().title(Line::from(title).bold()))
+}
+
+fn render_picker_item(
+    item: &crate::input_commands::PickerItem,
+    selected: bool,
+    kind: CommandKind,
+) -> ListItem<'static> {
+    let selected_style = match kind {
+        CommandKind::Files => Style::new().fg(Color::Black).bg(Color::Cyan),
+        CommandKind::Actions => Style::new().fg(Color::Black).bg(Color::Yellow),
+    };
+    let label_style = if selected {
+        selected_style
+    } else {
+        Style::new().fg(Color::White)
+    };
+    let mut spans = vec![Span::from(item.label.clone()).style(label_style)];
+    if let Some(secondary) = &item.secondary {
+        spans.push(Span::from("  "));
+        spans.push(Span::from(secondary.clone()).style(if selected {
+            selected_style.patch(Style::new().dark_gray())
+        } else {
+            Style::new().dark_gray()
+        }));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn picker_popup_height(picker: &CommandPicker) -> u16 {
@@ -845,6 +844,32 @@ mod tests {
         let rendered = format!("{list:?}");
         assert!(rendered.contains("alpha.rs"));
         assert!(rendered.contains("src/alpha.rs"));
+    }
+
+    #[test]
+    fn command_picker_virtual_window_caps_at_ten_rows() {
+        let picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: crate::input_commands::PickerStage::Files,
+            root: ".".into(),
+            filter: String::new(),
+            selected: 11,
+            items: (0..12)
+                .map(|index| crate::input_commands::PickerItem {
+                    label: format!("file{index}.rs"),
+                    secondary: None,
+                    action: crate::input_commands::PickerAction::Insert(format!("@file{index}.rs")),
+                })
+                .collect(),
+        };
+
+        let list = render_command_picker(&picker);
+        let rendered = format!("{list:?}");
+
+        assert!(rendered.contains("file2.rs"));
+        assert!(rendered.contains("file11.rs"));
+        assert!(!rendered.contains("file0.rs"));
+        assert!(!rendered.contains("file1.rs"));
     }
 
     #[test]
