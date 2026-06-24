@@ -5,7 +5,7 @@ use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use tui_input::Input;
 
@@ -163,9 +163,12 @@ pub fn render_chat(
     );
     frame.render_widget(transcript, transcript_body);
 
+    let scroll = input.visual_scroll(input_area.width.saturating_sub(3) as usize);
     let input_widget = Paragraph::new(input.value())
         .style(Style::new().fg(Color::Yellow))
+        .scroll((0, scroll as u16))
         .block(Block::bordered().title("Prompt"));
+    frame.render_widget(Clear, input_area);
     frame.render_widget(input_widget, input_area);
 
     let status = if let Some(picker) = command_picker {
@@ -205,7 +208,6 @@ pub fn render_chat(
         frame.render_widget(picker_list, picker_area);
     }
 
-    let scroll = input.visual_scroll(input_area.width.saturating_sub(3) as usize);
     let cursor = input.visual_cursor().saturating_sub(scroll) as u16;
     frame.set_cursor_position((input_area.x + 1 + cursor, input_area.y + 1));
 
@@ -524,6 +526,8 @@ mod tests {
         ModelKind, Role, Session, SessionKind,
     };
     use ratatui::{backend::TestBackend, Terminal};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tui_input::Input;
 
     #[test]
@@ -746,6 +750,119 @@ mod tests {
     }
 
     #[test]
+    fn render_chat_clears_previous_chinese_input_from_prompt_area() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let input_with_chinese: Input = "中文".into();
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &input_with_chinese,
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw initial chinese input");
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw cleared input");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains('中'));
+        assert!(!rendered.contains('文'));
+    }
+
+    #[test]
+    fn render_chat_scrolls_long_chinese_input_into_view() {
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let input_with_chinese: Input = "甲乙丙丁戊己庚辛壬癸".into();
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &input_with_chinese,
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw long chinese input");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains('壬') || rendered.contains('癸'));
+        assert!(!rendered.contains('甲'));
+    }
+
+    #[test]
+    fn render_chat_places_cursor_with_long_chinese_input_in_visible_area() {
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let input_with_chinese: Input = "甲乙丙丁戊己庚辛壬癸".into();
+
+        terminal
+            .draw(|frame| {
+                render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &input_with_chinese,
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                )
+            })
+            .expect("draw long chinese input");
+
+        let cursor = terminal.backend().cursor_position();
+        assert!(cursor.x > 0);
+        assert!(cursor.y > 0);
+        assert!(cursor.x < 20);
+        assert!(cursor.y < 10);
+    }
+
+    #[test]
     fn render_chat_scrolls_transcript_when_paused() {
         let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
         session.messages.push(Message::assistant("thinking...\n- analyzing request"));
@@ -876,28 +993,89 @@ mod tests {
 
     #[test]
     fn command_picker_virtual_window_caps_at_ten_rows() {
-        let picker = CommandPicker {
-            kind: CommandKind::Files,
-            stage: crate::input_commands::PickerStage::Files,
-            root: ".".into(),
-            filter: String::new(),
-            selected: 11,
-            items: (0..12)
-                .map(|index| crate::input_commands::PickerItem {
-                    label: format!("file{index}.rs"),
-                    secondary: None,
-                    action: crate::input_commands::PickerAction::Insert(format!("@file{index}.rs")),
-                })
-                .collect(),
-        };
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("new-input-form-picker-{unique}"));
+        fs::create_dir_all(&root).expect("create picker root");
+        for index in 0..12 {
+            fs::write(root.join(format!("l{index}.rs")), "content").expect("write picker file");
+        }
+
+        let mut picker = CommandPicker::files(&root);
+        picker.push_filter_char('l');
+        picker.selected = 11;
+
+        assert_eq!(picker.stage, crate::input_commands::PickerStage::Files);
+        assert_eq!(picker.visible_items().len(), 12);
 
         let list = render_command_picker(&picker);
         let rendered = format!("{list:?}");
 
-        assert!(rendered.contains("file2.rs"));
-        assert!(rendered.contains("file11.rs"));
-        assert!(!rendered.contains("file0.rs"));
-        assert!(!rendered.contains("file1.rs"));
+        assert!(rendered.contains("l2.rs"));
+        assert!(rendered.contains("l11.rs"));
+        assert!(!rendered.contains("l0.rs"));
+        assert!(!rendered.contains("l1.rs"));
+    }
+
+    #[test]
+    fn render_chat_shows_chinese_matches_in_picker_results() {
+        let picker = CommandPicker {
+            kind: CommandKind::Files,
+            stage: crate::input_commands::PickerStage::Files,
+            root: ".".into(),
+            filter: "中文".to_string(),
+            selected: 0,
+            items: vec![
+                crate::input_commands::PickerItem {
+                    label: "中文说明.rs".to_string(),
+                    secondary: Some("src/中文说明.rs".to_string()),
+                    action: crate::input_commands::PickerAction::Insert("@中文说明.rs".to_string()),
+                },
+                crate::input_commands::PickerItem {
+                    label: "latin.rs".to_string(),
+                    secondary: Some("src/latin.rs".to_string()),
+                    action: crate::input_commands::PickerAction::Insert("@latin.rs".to_string()),
+                },
+            ],
+        };
+
+        let list = render_command_picker(&picker);
+        let rendered = format!("{list:?}");
+        assert!(rendered.contains("中文说明.rs"));
+        assert!(rendered.contains("src/中文说明.rs"));
+        assert!(!rendered.contains("latin.rs"));
+    }
+
+    #[test]
+    fn render_chat_shows_chinese_choice_labels() {
+        let choice_group = ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "选择".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "请选择模式".to_string(),
+                options: vec![
+                    ChoiceOption {
+                        id: "快速".to_string(),
+                        label: "快速".to_string(),
+                    },
+                    ChoiceOption {
+                        id: "安全".to_string(),
+                        label: "安全".to_string(),
+                    },
+                ],
+            }],
+            submit_label: "提交".to_string(),
+        });
+
+        let rendered = format!("{:?}", render_choice_group(&choice_group));
+        assert!(rendered.contains("选择"));
+        assert!(rendered.contains("请选择模式"));
+        assert!(rendered.contains("快速"));
+        assert!(rendered.contains("安全"));
+        assert!(rendered.contains("提交"));
     }
 
     #[test]

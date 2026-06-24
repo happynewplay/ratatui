@@ -287,7 +287,6 @@ impl App {
                     self.transcript_scroll = 0;
                 }
             }
-            self.history.push(session.clone());
             self.active_turn = None;
         }
     }
@@ -320,6 +319,7 @@ fn current_dir() -> PathBuf {
 mod tests {
     use super::*;
     use crate::agent::{ChoiceGroupBlock, ChoiceGroupState, ChoiceMode, ChoiceOption, ChoiceQuestion};
+    use ratatui::{backend::TestBackend, Terminal};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     #[test]
@@ -502,9 +502,10 @@ mod tests {
         ));
         assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
-        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         let handled = app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -524,6 +525,57 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.content.contains("\"mode\"")));
+    }
+
+    #[test]
+    fn choice_group_supports_chinese_multi_question_submit_flow() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "选择".to_string(),
+            questions: vec![
+                ChoiceQuestion {
+                    id: "模式".to_string(),
+                    mode: ChoiceMode::Single,
+                    prompt: "请选择模式".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "快速".to_string(), label: "快速".to_string() },
+                        ChoiceOption { id: "安全".to_string(), label: "安全".to_string() },
+                    ],
+                },
+                ChoiceQuestion {
+                    id: "标签".to_string(),
+                    mode: ChoiceMode::Multi,
+                    prompt: "请选择标签".to_string(),
+                    options: vec![
+                        ChoiceOption { id: "中文".to_string(), label: "中文".to_string() },
+                        ChoiceOption { id: "混合".to_string(), label: "混合".to_string() },
+                    ],
+                },
+            ],
+            submit_label: "提交".to_string(),
+        }));
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(app.choice_group.is_none());
+        let session = app.current_session.as_ref().unwrap();
+        let last_message = session.messages.last().unwrap();
+        assert_eq!(last_message.role, crate::agent::Role::User);
+        assert!(last_message.content.contains("\"question_id\":\"模式\""));
+        assert!(last_message.content.contains("\"question_id\":\"标签\""));
+        assert!(last_message.content.contains("\"selected_ids\":[\"快速\"]"));
+        assert!(last_message.content.contains("\"selected_ids\":[\"中文\",\"混合\"]"));
     }
 
     #[test]
@@ -627,5 +679,72 @@ mod tests {
         }
 
         assert!(app.choice_group.is_none());
+    }
+
+    #[test]
+    fn tick_active_turn_does_not_duplicate_live_session_in_history() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.active_turn = app
+            .current_session
+            .as_mut()
+            .and_then(|session| session.begin_turn("/plan write tests"));
+
+        while app.active_turn.is_some() {
+            app.tick_active_turn();
+        }
+
+        assert!(app.history.is_empty());
+        assert!(app
+            .current_session
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.role == crate::agent::Role::User
+                && message.content == "/plan write tests"));
+    }
+
+    #[test]
+    fn render_chat_shows_each_live_user_message_once() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.active_turn = app
+            .current_session
+            .as_mut()
+            .and_then(|session| session.begin_turn("hello"));
+
+        while app.active_turn.is_some() {
+            app.tick_active_turn();
+        }
+
+        terminal
+            .draw(|frame| {
+                crate::ui::render_chat(
+                    frame,
+                    app.current_session.as_ref(),
+                    &app.history,
+                    &app.input,
+                    app.command_mode,
+                    app.command_picker.as_ref(),
+                    app.choice_group.as_ref(),
+                    app.spinner_frame,
+                    app.follow_transcript,
+                    app.transcript_scroll,
+                )
+            })
+            .expect("draw chat");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(rendered.matches("hello").count(), 1);
     }
 }
