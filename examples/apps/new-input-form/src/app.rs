@@ -185,6 +185,8 @@ impl App {
                         if let Some(session) = self.current_session.as_mut() {
                             session.messages.push(crate::agent::Message::user(payload));
                         }
+                        self.follow_transcript = true;
+                        self.transcript_scroll = 0;
                         self.choice_group = None;
                     }
                 }
@@ -255,6 +257,8 @@ impl App {
                         if let Some(session) = self.current_session.as_mut() {
                             self.active_turn = session.begin_turn(&content);
                         }
+                        self.follow_transcript = true;
+                        self.transcript_scroll = 0;
                         self.input.reset();
                     }
                 }
@@ -299,7 +303,10 @@ impl App {
             self.active_turn = None;
             return;
         };
-        if turn.tick(session) {
+        let completed = turn.tick(session);
+        self.follow_transcript = true;
+        self.transcript_scroll = 0;
+        if completed {
             if self.choice_group.is_none() {
                 if let Some(choice_group) = session.take_pending_choice_group() {
                     self.choice_group = Some(crate::agent::ChoiceGroupState::new(choice_group));
@@ -450,6 +457,53 @@ mod tests {
         assert!(!handled);
         assert!(app.follow_transcript);
         assert_eq!(app.transcript_scroll, 0);
+    }
+
+    #[test]
+    fn sending_message_returns_transcript_to_auto_follow() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.follow_transcript = false;
+        app.transcript_scroll = 9;
+        app.input = Input::from("hello");
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
+        assert_eq!(app.input.value(), "");
+    }
+
+    #[test]
+    fn submitting_choice_group_returns_transcript_to_auto_follow() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.follow_transcript = false;
+        app.transcript_scroll = 9;
+        app.choice_group = Some(ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "Pick".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "Mode?".to_string(),
+                options: vec![
+                    ChoiceOption { id: "fast".to_string(), label: "Fast".to_string() },
+                    ChoiceOption { id: "safe".to_string(), label: "Safe".to_string() },
+                ],
+            }],
+            submit_label: "Submit".to_string(),
+        }));
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
+        assert!(app.choice_group.is_none());
     }
 
     #[test]
@@ -749,6 +803,25 @@ mod tests {
                 .and_then(|session| session.take_pending_choice_group())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn tick_active_turn_keeps_transcript_following_while_streaming() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.follow_transcript = false;
+        app.transcript_scroll = 12;
+        app.active_turn = app
+            .current_session
+            .as_mut()
+            .and_then(|session| session.begin_turn("/plan write tests"));
+
+        app.tick_active_turn();
+
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
+        assert!(app.active_turn.is_some());
     }
 
     #[test]
