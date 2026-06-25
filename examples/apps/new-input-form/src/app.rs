@@ -2,12 +2,13 @@ use crate::agent::{
     ChoiceGroupState, ClaudeCodeDashboardState, FocusTarget, PendingTurn, Session, SessionKind,
     ModelKind, ToolEvent, ToolKind, ToolStatus,
 };
-use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome};
+use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome, workspace_relative_path};
 use crate::ui;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{env, path::PathBuf};
+use std::{env, fs, process::Command as ProcessCommand};
 use ratatui::{DefaultTerminal, Frame};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -375,6 +376,18 @@ impl App {
                 self.state = AppState::SessionSelect;
                 false
             }
+            KeyCode::Char('r') => {
+                self.run_workspace_read();
+                false
+            }
+            KeyCode::Char('w') => {
+                self.run_workspace_write();
+                false
+            }
+            KeyCode::Char('e') => {
+                self.run_workspace_execute();
+                false
+            }
             _ => false,
         }
     }
@@ -388,6 +401,106 @@ impl App {
         }
         self.claude_code_state.activity_log.push(event);
         self.input = Input::from(target);
+    }
+
+    fn run_workspace_read(&mut self) {
+        let target = self.input.value().trim();
+        let root = current_dir();
+        let path = root.join(if target.is_empty() { "src/main.rs" } else { target });
+        let mut event = ToolEvent::new(ToolKind::Read, path.display().to_string());
+        event.status = ToolStatus::Running;
+        event.summary = "reading file".to_string();
+        self.apply_tool_event(event.clone());
+
+        let summary = match fs::read_to_string(&path) {
+            Ok(content) => {
+                let snippet = content.lines().next().unwrap_or_default().to_string();
+                Some((ToolStatus::Done, format!("preview: {snippet}"), None))
+            }
+            Err(err) => Some((ToolStatus::Error, String::new(), Some(err.to_string()))),
+        };
+
+        if let Some((status, summary, error)) = summary {
+            let mut done = ToolEvent::new(ToolKind::Read, path.display().to_string());
+            done.status = status;
+            done.summary = summary;
+            done.error = error;
+            self.apply_tool_event(done);
+        }
+    }
+
+    fn run_workspace_write(&mut self) {
+        let target = self.input.value().trim();
+        let root = current_dir();
+        let path = root.join(if target.is_empty() { "target/new-input-form-claude-code.txt" } else { target });
+        let mut event = ToolEvent::new(ToolKind::Write, path.display().to_string());
+        event.status = ToolStatus::Running;
+        event.summary = "writing file".to_string();
+        self.apply_tool_event(event.clone());
+
+        let write_result = workspace_relative_path(&root, &path)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, "path escapes workspace"))
+            .and_then(|relative| {
+                let absolute = root.join(relative);
+                if let Some(parent) = absolute.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&absolute, b"new-input-form claude code mode\n")?;
+                Ok(absolute)
+            });
+
+        let mut done = ToolEvent::new(ToolKind::Write, path.display().to_string());
+        match write_result {
+            Ok(absolute) => {
+                done.status = ToolStatus::Done;
+                done.summary = format!("saved {}", absolute.display());
+            }
+            Err(err) => {
+                done.status = ToolStatus::Error;
+                done.error = Some(err.to_string());
+            }
+        }
+        self.apply_tool_event(done);
+    }
+
+    fn run_workspace_execute(&mut self) {
+        let command = self.input.value().trim().to_string();
+        let command = if command.is_empty() {
+            "cargo test -p new-input-form --lib app::tests::session_select_lists_claude_code_last_and_enters_dashboard".to_string()
+        } else {
+            command
+        };
+        let command_for_exec = command.clone();
+        let mut event = ToolEvent::new(ToolKind::Execute, command.clone());
+        event.status = ToolStatus::Running;
+        event.summary = "running command".to_string();
+        self.apply_tool_event(event.clone());
+
+        let output = ProcessCommand::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args(if cfg!(windows) { vec!["/C", command_for_exec.as_str()] } else { vec!["-lc", command_for_exec.as_str()] })
+            .output();
+
+        let mut done = ToolEvent::new(ToolKind::Execute, command_for_exec.as_str());
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    done.status = ToolStatus::Done;
+                    done.summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if done.summary.is_empty() {
+                        done.summary = "command completed".to_string();
+                    }
+                } else {
+                    done.status = ToolStatus::Error;
+                    done.summary = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    done.error = Some(format!("exit status {:?}", output.status.code()));
+                }
+            }
+            Err(err) => {
+                done.status = ToolStatus::Error;
+                done.error = Some(err.to_string());
+            }
+        }
+        self.apply_tool_event(done);
     }
 
     fn sync_transcript_scroll(&mut self, max_transcript_scroll: usize) {
@@ -889,6 +1002,76 @@ mod tests {
 
         assert!(!should_quit);
         assert!(matches!(app.state, AppState::SessionSelect));
+    }
+
+    #[test]
+    fn claude_code_read_updates_read_block() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        app.input = Input::from("examples/apps/new-input-form/Cargo.toml");
+
+        app.run_workspace_read();
+
+        assert_eq!(app.claude_code_state.read.kind, ToolKind::Read);
+        assert!(matches!(
+            app.claude_code_state.read.status,
+            ToolStatus::Done | ToolStatus::Error
+        ));
+        assert_eq!(app.claude_code_state.activity_log.len(), 2);
+    }
+
+    #[test]
+    fn claude_code_write_updates_write_block() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        app.input = Input::from("target/new-input-form-claude-code.txt");
+
+        app.run_workspace_write();
+
+        assert_eq!(app.claude_code_state.write.kind, ToolKind::Write);
+        assert!(matches!(
+            app.claude_code_state.write.status,
+            ToolStatus::Done | ToolStatus::Error
+        ));
+    }
+
+    #[test]
+    fn claude_code_execute_updates_execute_block() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        app.input = Input::from("cargo test -p new-input-form --lib app::tests::session_select_lists_claude_code_last_and_enters_dashboard");
+
+        app.run_workspace_execute();
+
+        assert_eq!(app.claude_code_state.execute.kind, ToolKind::Execute);
+        assert!(matches!(
+            app.claude_code_state.execute.status,
+            ToolStatus::Done | ToolStatus::Error
+        ));
+    }
+
+    #[test]
+    fn claude_code_activity_log_grows_for_multiple_events() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        app.apply_tool_event(ToolEvent {
+            kind: ToolKind::Read,
+            status: ToolStatus::Done,
+            target: "src/main.rs".to_string(),
+            summary: "read".to_string(),
+            error: None,
+            elapsed_ms: None,
+        });
+        app.apply_tool_event(ToolEvent {
+            kind: ToolKind::Write,
+            status: ToolStatus::Done,
+            target: "target/new-input-form-claude-code.txt".to_string(),
+            summary: "saved".to_string(),
+            error: None,
+            elapsed_ms: None,
+        });
+
+        assert_eq!(app.claude_code_state.activity_log.len(), 2);
     }
 
     #[test]

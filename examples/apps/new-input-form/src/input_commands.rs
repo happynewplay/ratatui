@@ -308,7 +308,14 @@ pub fn list_files(root: impl AsRef<Path>) -> Vec<PathBuf> {
 }
 
 pub fn workspace_relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
-    path.strip_prefix(root).ok().map(Path::to_path_buf)
+    let relative = path.strip_prefix(root).ok()?.to_path_buf();
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(relative)
 }
 
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
@@ -597,11 +604,13 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let inside = root.join("src/main.rs");
         let outside = PathBuf::from("/tmp/main.rs");
+        let escaped = root.join("../etc/passwd");
 
         assert_eq!(
             workspace_relative_path(&root, &inside),
             Some(PathBuf::from("src/main.rs"))
         );
         assert_eq!(workspace_relative_path(&root, &outside), None);
+        assert_eq!(workspace_relative_path(&root, &escaped), None);
     }
 }
