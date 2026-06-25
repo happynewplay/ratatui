@@ -307,6 +307,10 @@ pub fn list_files(root: impl AsRef<Path>) -> Vec<PathBuf> {
     files
 }
 
+pub fn workspace_relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    path.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
@@ -586,5 +590,18 @@ mod tests {
         assert_eq!(picker.selected, 0);
         picker.move_up();
         assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn workspace_relative_path_refuses_outside_roots() {
+        let root = PathBuf::from("/workspace");
+        let inside = root.join("src/main.rs");
+        let outside = PathBuf::from("/tmp/main.rs");
+
+        assert_eq!(
+            workspace_relative_path(&root, &inside),
+            Some(PathBuf::from("src/main.rs"))
+        );
+        assert_eq!(workspace_relative_path(&root, &outside), None);
     }
 }
