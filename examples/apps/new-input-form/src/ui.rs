@@ -157,8 +157,25 @@ fn render_tool_block(
     event: &crate::agent::ToolEvent,
     focused: bool,
 ) -> Paragraph<'static> {
+    let status_style = match event.status {
+        crate::agent::ToolStatus::Idle => Style::new().dark_gray(),
+        crate::agent::ToolStatus::Queued => Style::new().fg(Color::Cyan),
+        crate::agent::ToolStatus::Running => Style::new().fg(Color::Yellow).bold(),
+        crate::agent::ToolStatus::Done => Style::new().fg(Color::Green),
+        crate::agent::ToolStatus::Error => Style::new().fg(Color::Red).bold(),
+    };
+    let status_label = match event.status {
+        crate::agent::ToolStatus::Idle => "IDLE",
+        crate::agent::ToolStatus::Queued => "QUEUED",
+        crate::agent::ToolStatus::Running => "RUNNING",
+        crate::agent::ToolStatus::Done => "DONE",
+        crate::agent::ToolStatus::Error => "ERROR",
+    };
     let mut lines = vec![
-        Line::from(format!("status: {:?}", event.status)),
+        Line::from(vec![
+            Span::from("status: "),
+            Span::from(status_label).style(status_style),
+        ]),
         Line::from(format!("target: {}", if event.target.is_empty() { "<none>" } else { &event.target })),
     ];
     if !event.summary.is_empty() {
@@ -171,9 +188,9 @@ fn render_tool_block(
         lines.push(Line::from(format!("elapsed: {elapsed}ms")));
     }
     let title = if focused {
-        format!("{title} [focused]")
+        format!("{title} [{status_label}]")
     } else {
-        title.to_string()
+        format!("{title} [{status_label}]")
     };
     let block = if focused {
         Block::bordered()
@@ -1386,6 +1403,9 @@ mod tests {
         assert!(rendered.contains("done:"));
         assert!(rendered.contains("error:"));
         assert!(rendered.contains("focused:"));
+        assert!(rendered.contains("RUNNING"));
+        assert!(rendered.contains("DONE"));
+        assert!(rendered.contains("ERROR"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("src/ui.rs"));
         assert!(rendered.contains("cargo test -p new-input-form"));
