@@ -73,22 +73,63 @@ pub fn render_model_select(frame: &mut Frame, session_index: usize, selected: us
 }
 
 pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboardState) -> usize {
-    let layout = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]);
-    let [header_area, body_area] = frame.area().layout(&layout);
-    frame.render_widget(
-        Block::bordered().title(Line::from("Claude Code").bold()),
-        header_area,
-    );
-    let body = Paragraph::new(format!(
-        "Read: {:?}\nWrite: {:?}\nExecute: {:?}\nActivity log: {}",
-        state.read.status,
-        state.write.status,
-        state.execute.status,
-        state.activity_log.len()
-    ))
-    .block(Block::bordered().title("Workspace tools"));
-    frame.render_widget(body, body_area);
+    let layout = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(8),
+    ]);
+    let [header_area, body_area, log_area] = frame.area().layout(&layout);
+    let header = Line::from_iter([
+        Span::from("Claude Code").bold(),
+        Span::from("  workspace-bound tools"),
+    ]);
+    frame.render_widget(Block::bordered().title(header), header_area);
+
+    let columns = Layout::horizontal([
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+    ]);
+    let [read_area, write_area, execute_area] = body_area.layout(&columns);
+    frame.render_widget(render_tool_block("Read", &state.read), read_area);
+    frame.render_widget(render_tool_block("Write", &state.write), write_area);
+    frame.render_widget(render_tool_block("Execute", &state.execute), execute_area);
+
+    let log = render_activity_log(state);
+    frame.render_widget(log, log_area);
     0
+}
+
+fn render_tool_block(title: &'static str, event: &crate::agent::ToolEvent) -> Paragraph<'static> {
+    let mut lines = vec![
+        Line::from(format!("status: {:?}", event.status)),
+        Line::from(format!("target: {}", if event.target.is_empty() { "<none>" } else { &event.target })),
+    ];
+    if !event.summary.is_empty() {
+        lines.push(Line::from(format!("summary: {}", event.summary)));
+    }
+    if let Some(error) = &event.error {
+        lines.push(Line::from(format!("error: {error}")));
+    }
+    if let Some(elapsed) = event.elapsed_ms {
+        lines.push(Line::from(format!("elapsed: {elapsed}ms")));
+    }
+    Paragraph::new(lines).block(Block::bordered().title(title))
+}
+
+fn render_activity_log(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
+    let mut lines = Vec::new();
+    if state.activity_log.is_empty() {
+        lines.push(Line::from("No tool activity yet").style(Style::new().dark_gray()));
+    } else {
+        for event in state.activity_log.iter().rev().take(5) {
+            lines.push(Line::from(format!("{:?}: {:?} -> {}", event.kind, event.status, event.target)));
+            if !event.summary.is_empty() {
+                lines.push(Line::from(format!("  {}", event.summary)).style(Style::new().dark_gray()));
+            }
+        }
+    }
+    Paragraph::new(lines).block(Block::bordered().title("Activity log"))
 }
 
 pub fn render_chat(
@@ -642,8 +683,9 @@ fn wrap_plain_lines(text: &str, width: u16) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::agent::{
-        ChoiceGroupBlock, ChoiceGroupState, ChoiceMode, ChoiceOption, ChoiceQuestion, Message,
-        ModelKind, Role, Session, SessionKind,
+        ChoiceGroupBlock, ChoiceGroupState, ChoiceMode, ChoiceOption, ChoiceQuestion,
+        ClaudeCodeDashboardState, Message, ModelKind, Role, Session, SessionKind, ToolEvent,
+        ToolKind, ToolStatus,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use std::fs;
@@ -1196,6 +1238,61 @@ mod tests {
         assert!(rendered.contains("快速"));
         assert!(rendered.contains("安全"));
         assert!(rendered.contains("提交"));
+    }
+
+    #[test]
+    fn renders_claude_code_dashboard_with_three_tool_blocks() {
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut state = ClaudeCodeDashboardState::new();
+        state.read = ToolEvent {
+            kind: ToolKind::Read,
+            status: ToolStatus::Running,
+            target: "src/main.rs".to_string(),
+            summary: "reading".to_string(),
+            error: None,
+            elapsed_ms: Some(15),
+        };
+        state.write = ToolEvent {
+            kind: ToolKind::Write,
+            status: ToolStatus::Done,
+            target: "src/ui.rs".to_string(),
+            summary: "saved".to_string(),
+            error: None,
+            elapsed_ms: Some(23),
+        };
+        state.execute = ToolEvent {
+            kind: ToolKind::Execute,
+            status: ToolStatus::Error,
+            target: "cargo test -p new-input-form".to_string(),
+            summary: "failed".to_string(),
+            error: Some("exit status 1".to_string()),
+            elapsed_ms: Some(38),
+        };
+        state.activity_log.push(state.read.clone());
+        state.activity_log.push(state.write.clone());
+        state.activity_log.push(state.execute.clone());
+
+        terminal
+            .draw(|frame| {
+                let _ = render_claude_code_dashboard(frame, &state);
+            })
+            .expect("draw dashboard");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Claude Code"));
+        assert!(rendered.contains("Read"));
+        assert!(rendered.contains("Write"));
+        assert!(rendered.contains("Execute"));
+        assert!(rendered.contains("Activity log"));
+        assert!(rendered.contains("src/main.rs"));
+        assert!(rendered.contains("src/ui.rs"));
+        assert!(rendered.contains("cargo test -p new-input-form"));
     }
 
     #[test]
