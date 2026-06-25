@@ -373,7 +373,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state = AppState::SessionSelect;
-                true
+                false
             }
             _ => false,
         }
@@ -878,6 +878,17 @@ mod tests {
         assert_eq!(app.claude_code_state.execute.status, ToolStatus::Running);
         assert_eq!(app.claude_code_state.activity_log.len(), 1);
         assert_eq!(app.claude_code_state.activity_log[0].target, "cargo test -p new-input-form");
+    }
+
+    #[test]
+    fn claude_code_dashboard_returns_to_menu_with_escape() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+
+        let should_quit = app.handle_claude_code(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!should_quit);
+        assert!(matches!(app.state, AppState::SessionSelect));
     }
 
     #[test]
