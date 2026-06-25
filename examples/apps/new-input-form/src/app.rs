@@ -380,6 +380,14 @@ impl App {
                 self.claude_code_state.focus_next();
                 false
             }
+            KeyCode::Enter => {
+                match self.claude_code_state.focused {
+                    ToolKind::Read => self.run_workspace_read(),
+                    ToolKind::Write => self.run_workspace_write(),
+                    ToolKind::Execute => self.run_workspace_execute(),
+                }
+                false
+            }
             KeyCode::Char('r') => {
                 self.run_workspace_read();
                 false
@@ -1092,6 +1100,22 @@ mod tests {
 
         app.handle_claude_code(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.claude_code_state.focused, ToolKind::Read);
+    }
+
+    #[test]
+    fn enter_runs_the_currently_focused_claude_code_action() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        app.input = Input::from("examples/apps/new-input-form/Cargo.toml");
+
+        let handled = app.handle_claude_code(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert_eq!(app.claude_code_state.read.kind, ToolKind::Read);
+        assert!(matches!(
+            app.claude_code_state.read.status,
+            ToolStatus::Done | ToolStatus::Error
+        ));
     }
 
     #[test]
