@@ -93,9 +93,22 @@ pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboa
         Constraint::Percentage(33),
     ]);
     let [read_area, write_area, execute_area] = body_area.layout(&columns);
-    frame.render_widget(render_tool_block("Read", &state.read), read_area);
-    frame.render_widget(render_tool_block("Write", &state.write), write_area);
-    frame.render_widget(render_tool_block("Execute", &state.execute), execute_area);
+    frame.render_widget(
+        render_tool_block("Read", &state.read, matches!(state.focused, crate::agent::ToolKind::Read)),
+        read_area,
+    );
+    frame.render_widget(
+        render_tool_block("Write", &state.write, matches!(state.focused, crate::agent::ToolKind::Write)),
+        write_area,
+    );
+    frame.render_widget(
+        render_tool_block(
+            "Execute",
+            &state.execute,
+            matches!(state.focused, crate::agent::ToolKind::Execute),
+        ),
+        execute_area,
+    );
 
     let log = render_activity_log(state);
     frame.render_widget(log, log_area);
@@ -132,7 +145,11 @@ fn render_command_bar(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
     Paragraph::new(vec![shortcuts, stats, last_line]).block(Block::bordered().title("Command bar"))
 }
 
-fn render_tool_block(title: &'static str, event: &crate::agent::ToolEvent) -> Paragraph<'static> {
+fn render_tool_block(
+    title: &'static str,
+    event: &crate::agent::ToolEvent,
+    focused: bool,
+) -> Paragraph<'static> {
     let mut lines = vec![
         Line::from(format!("status: {:?}", event.status)),
         Line::from(format!("target: {}", if event.target.is_empty() { "<none>" } else { &event.target })),
@@ -146,7 +163,14 @@ fn render_tool_block(title: &'static str, event: &crate::agent::ToolEvent) -> Pa
     if let Some(elapsed) = event.elapsed_ms {
         lines.push(Line::from(format!("elapsed: {elapsed}ms")));
     }
-    Paragraph::new(lines).block(Block::bordered().title(title))
+    let block = if focused {
+        Block::bordered()
+            .title(title)
+            .border_style(Style::new().fg(Color::Cyan).bold())
+    } else {
+        Block::bordered().title(title)
+    };
+    Paragraph::new(lines).block(block)
 }
 
 fn render_activity_log(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {

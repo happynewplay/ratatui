@@ -376,6 +376,10 @@ impl App {
                 self.state = AppState::SessionSelect;
                 false
             }
+            KeyCode::Tab => {
+                self.claude_code_state.focus_next();
+                false
+            }
             KeyCode::Char('r') => {
                 self.run_workspace_read();
                 false
@@ -1072,6 +1076,22 @@ mod tests {
         });
 
         assert_eq!(app.claude_code_state.activity_log.len(), 2);
+    }
+
+    #[test]
+    fn tab_cycles_claude_code_focus() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+        assert_eq!(app.claude_code_state.focused, ToolKind::Read);
+
+        app.handle_claude_code(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.claude_code_state.focused, ToolKind::Write);
+
+        app.handle_claude_code(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.claude_code_state.focused, ToolKind::Execute);
+
+        app.handle_claude_code(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.claude_code_state.focused, ToolKind::Read);
     }
 
     #[test]

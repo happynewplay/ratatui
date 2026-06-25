@@ -82,6 +82,7 @@ pub struct ClaudeCodeDashboardState {
     pub write: ToolEvent,
     pub execute: ToolEvent,
     pub activity_log: Vec<ToolEvent>,
+    pub focused: ToolKind,
 }
 
 impl ClaudeCodeDashboardState {
@@ -91,7 +92,16 @@ impl ClaudeCodeDashboardState {
             write: ToolEvent::new(ToolKind::Write, ""),
             execute: ToolEvent::new(ToolKind::Execute, ""),
             activity_log: Vec::new(),
+            focused: ToolKind::Read,
         }
+    }
+
+    pub fn focus_next(&mut self) {
+        self.focused = match self.focused {
+            ToolKind::Read => ToolKind::Write,
+            ToolKind::Write => ToolKind::Execute,
+            ToolKind::Execute => ToolKind::Read,
+        };
     }
 }
 
