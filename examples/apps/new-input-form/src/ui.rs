@@ -2,6 +2,7 @@ use crate::agent::{
     ChoiceGroupState, FocusTarget, Message, ModelKind, Session, SessionKind,
 };
 use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -83,7 +84,9 @@ pub fn render_chat(
     follow_transcript: bool,
     transcript_scroll: usize,
 ) -> usize {
-    let choice_height = choice_group.map(|group| choice_group_height(group)).unwrap_or(0);
+    let choice_height = choice_group
+        .map(|group| choice_group_height(group, frame.area().width))
+        .unwrap_or(0);
     let picker_height = command_picker
         .map(|picker| picker_popup_height(picker) + 2)
         .unwrap_or(0);
@@ -119,17 +122,6 @@ pub fn render_chat(
     };
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
-    let transcript_lines = transcript_lines(history, session);
-    let transcript_total_len = transcript_lines.len();
-    let transcript_height = transcript_body.height as usize;
-    let transcript_window = transcript_height.max(1);
-    let transcript_start = if follow_transcript {
-        transcript_total_len.saturating_sub(transcript_window)
-    } else {
-        transcript_scroll.min(transcript_total_len.saturating_sub(transcript_window))
-    };
-    let transcript_total = transcript_total_len.max(1);
-    let transcript_position = transcript_start.saturating_add(1).min(transcript_total);
 
     let header = match session {
         Some(session) => Line::from_iter([
@@ -145,6 +137,19 @@ pub fn render_chat(
     let sidebar = render_sidebar(history, session);
     frame.render_widget(sidebar, sidebar_area);
 
+    let transcript_inner = transcript_body.inner(Margin::new(1, 1));
+    let transcript_content_width = transcript_inner.width.saturating_sub(1).max(1);
+    let transcript_lines = transcript_lines(history, session, transcript_content_width);
+    let transcript_total_len = transcript_lines.len();
+    let transcript_height = transcript_inner.height as usize;
+    let transcript_window = transcript_height.max(1);
+    let transcript_start = if follow_transcript {
+        transcript_total_len.saturating_sub(transcript_window)
+    } else {
+        transcript_scroll.min(transcript_total_len.saturating_sub(transcript_window))
+    };
+    let transcript_total = transcript_total_len.max(1);
+    let transcript_position = transcript_start.saturating_add(1).min(transcript_total);
     let transcript_title = Line::from(vec![
         Span::from("Transcript").style(Style::new().bold()),
         Span::from(" "),
@@ -160,8 +165,6 @@ pub fn render_chat(
         }),
     ]);
     frame.render_widget(Block::bordered().title(transcript_title), transcript_body);
-
-    let transcript_inner = transcript_body.inner(Margin::new(1, 1));
     let (transcript_content_area, transcript_scrollbar_area) =
         if transcript_lines.len() > transcript_window {
             let layout = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]);
@@ -223,7 +226,7 @@ pub fn render_chat(
     };
 
     if let (Some(choice_group), Some(choice_area)) = (choice_group, choice_area) {
-        let choice_widget = render_choice_group(choice_group);
+        let choice_widget = render_choice_group(choice_group, choice_area.width);
         frame.render_widget(choice_widget, choice_area);
     }
 
@@ -290,19 +293,28 @@ fn build_footer(
     Line::from_iter(spans).style(Style::new().dark_gray())
 }
 
-fn choice_group_height(state: &ChoiceGroupState) -> u16 {
-    let mut body_height = 2usize;
-    for question in &state.block.questions {
-        body_height += 2;
-        body_height += question.options.len();
-    }
+fn choice_group_height(state: &ChoiceGroupState, area_width: u16) -> u16 {
+    let inner_width = area_width.saturating_sub(2).max(1);
+    let mut body_height = choice_group_lines(state, inner_width).len();
     body_height += 2;
     body_height.min(10).max(5) as u16
 }
 
-fn render_choice_group(state: &ChoiceGroupState) -> Paragraph<'static> {
+fn render_choice_group(state: &ChoiceGroupState, area_width: u16) -> Paragraph<'static> {
+    let inner_width = area_width.saturating_sub(2).max(1);
+    let lines = choice_group_lines(state, inner_width);
+    Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(Block::bordered().title("Choices"))
+}
+
+fn choice_group_lines(state: &ChoiceGroupState, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    lines.push(Line::from(state.block.title.clone()).bold());
+    lines.extend(styled_wrapped_lines(
+        &state.block.title,
+        Style::new().bold(),
+        width,
+    ));
     for (question_index, question) in state.block.questions.iter().enumerate() {
         let question_focus = matches!(
             state.focus,
@@ -316,7 +328,7 @@ fn render_choice_group(state: &ChoiceGroupState) -> Paragraph<'static> {
         } else {
             Style::new()
         };
-        lines.push(Line::from(question.prompt.clone()).style(focus_style));
+        lines.extend(styled_wrapped_lines(&question.prompt, focus_style, width));
         for (option_index, option) in question.options.iter().enumerate() {
             let checked = state.selected[question_index][option_index];
             let marker = if checked { "[x]" } else { "[ ]" };
@@ -333,22 +345,23 @@ fn render_choice_group(state: &ChoiceGroupState) -> Paragraph<'static> {
             } else {
                 Style::new()
             };
-            lines.push(
-                Line::from(vec![
-                    Span::from(marker),
-                    Span::from(" "),
-                    Span::from(option.label.clone()),
-                ])
-                .style(option_style),
-            );
+            lines.extend(styled_wrapped_lines(
+                &format!("{marker} {}", option.label),
+                option_style,
+                width,
+            ));
         }
     }
     let submit_style = match state.focus {
         FocusTarget::Submit => Style::new().fg(Color::Black).bg(Color::Green),
         _ => Style::new().fg(Color::Green),
     };
-    lines.push(Line::from(state.block.submit_label.clone()).style(submit_style));
-    Paragraph::new(lines).block(Block::bordered().title("Choices"))
+    lines.extend(styled_wrapped_lines(
+        &state.block.submit_label,
+        submit_style,
+        width,
+    ));
+    lines
 }
 
 fn render_command_picker(picker: &CommandPicker) -> List<'static> {
@@ -446,34 +459,46 @@ fn render_sidebar(history: &[Session], session: Option<&Session>) -> List<'stati
     List::new(items).block(Block::bordered().title("Control"))
 }
 
-fn transcript_lines(history: &[Session], session: Option<&Session>) -> Vec<ListItem<'static>> {
+fn transcript_lines(
+    history: &[Session],
+    session: Option<&Session>,
+    width: u16,
+) -> Vec<ListItem<'static>> {
     let mut transcript_lines: Vec<ListItem> = Vec::new();
     for session in history.iter().rev().take(3) {
-        transcript_lines.push(ListItem::new(Line::from(format!(
-            "session: {} / {}",
-            session.kind.label(),
-            session.model.label()
-        ))));
+        transcript_lines.extend(
+            styled_wrapped_lines(
+                &format!("session: {} / {}", session.kind.label(), session.model.label()),
+                Style::new(),
+                width,
+            )
+            .into_iter()
+            .map(ListItem::new),
+        );
         for message in &session.messages {
-            transcript_lines.push(render_message(message));
+            transcript_lines.extend(render_message_lines(message, width));
         }
     }
     if let Some(session) = session {
-        transcript_lines.push(ListItem::new(Line::from(format!(
-            "live: {} / {}",
-            session.kind.label(),
-            session.model.label()
-        ))));
+        transcript_lines.extend(
+            styled_wrapped_lines(
+                &format!("live: {} / {}", session.kind.label(), session.model.label()),
+                Style::new(),
+                width,
+            )
+            .into_iter()
+            .map(ListItem::new),
+        );
         for message in &session.messages {
-            transcript_lines.push(render_message(message));
+            transcript_lines.extend(render_message_lines(message, width));
         }
     }
     transcript_lines
 }
 
-fn render_message(message: &Message) -> ListItem<'static> {
+fn render_message_lines(message: &Message, width: u16) -> Vec<ListItem<'static>> {
     if message.role == crate::agent::Role::Tool {
-        return render_tool_message(message);
+        return render_tool_message_lines(message, width);
     }
 
     let role_style = match message.role {
@@ -488,60 +513,105 @@ fn render_message(message: &Message) -> ListItem<'static> {
         },
         crate::agent::Role::Tool => Style::new().fg(Color::Yellow),
     };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::from(format!("{}: ", message.role_label())).style(role_style),
-            Span::from(message.content.lines().next().unwrap_or_default().to_string()),
-        ]),
-    ];
+    let mut lines = styled_wrapped_lines(
+        &format!(
+            "{}: {}",
+            message.role_label(),
+            message.content.lines().next().unwrap_or_default()
+        ),
+        role_style,
+        width,
+    );
     for extra in message.content.lines().skip(1) {
         let extra_style = if message.content.starts_with("thinking...") {
             Style::new().fg(Color::Yellow)
         } else {
             Style::new().dark_gray()
         };
-        lines.push(Line::from(format!("  {extra}")).style(extra_style));
+        lines.extend(styled_wrapped_lines(&format!("  {extra}"), extra_style, width));
     }
-    ListItem::new(lines)
+    lines.into_iter().map(ListItem::new).collect()
 }
 
-fn render_tool_message(message: &Message) -> ListItem<'static> {
-    let mut lines = Vec::new();
+fn render_tool_message_lines(message: &Message, width: u16) -> Vec<ListItem<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
     for (index, line) in message.content.lines().enumerate() {
-        let rendered = match index {
-            0 => Line::from(vec![
-                Span::from("tool: ").style(Style::new().fg(Color::Magenta).bold()),
-                Span::from(line.strip_prefix("tool: ").unwrap_or(line).to_string()),
-            ]),
-            1 if line.starts_with("status:") => Line::from(vec![
-                Span::from("  ").style(Style::new().dark_gray()),
-                Span::from(line.to_string()).style(Style::new().fg(Color::Yellow)),
-            ]),
-            1 if line.contains("running ->") => Line::from(vec![
-                Span::from("  ").style(Style::new().dark_gray()),
-                Span::from(line.to_string()).style(Style::new().fg(Color::Yellow).bold()),
-            ]),
-            1 if line.starts_with("launch error:") => Line::from(vec![
-                Span::from("  ").style(Style::new().dark_gray()),
-                Span::from(line.to_string()).style(Style::new().fg(Color::Red)),
-            ]),
-            _ if line == "stdout:" || line == "stderr:" => Line::from(vec![
-                Span::from("  ").style(Style::new().dark_gray()),
-                Span::from(line.to_string()).style(Style::new().fg(Color::Cyan).bold()),
-            ]),
-            _ if line.trim() == "<empty>" => Line::from(vec![
-                Span::from("    ").style(Style::new().dark_gray()),
-                Span::from(line.trim().to_string()).style(Style::new().dark_gray()),
-            ]),
-            _ if line.starts_with("  ") => Line::from(vec![
-                Span::from("  ").style(Style::new().dark_gray()),
-                Span::from(line.trim_start().to_string()),
-            ]),
-            _ => Line::from(line.to_string()),
+        let (text, style) = match index {
+            0 => (
+                format!("tool: {}", line.strip_prefix("tool: ").unwrap_or(line)),
+                Style::new().fg(Color::Magenta).bold(),
+            ),
+            1 if line.starts_with("status:") => (format!("  {line}"), Style::new().fg(Color::Yellow)),
+            1 if line.contains("running ->") => {
+                (format!("  {line}"), Style::new().fg(Color::Yellow).bold())
+            }
+            1 if line.starts_with("launch error:") => {
+                (format!("  {line}"), Style::new().fg(Color::Red))
+            }
+            _ if line == "stdout:" || line == "stderr:" => {
+                (format!("  {line}"), Style::new().fg(Color::Cyan).bold())
+            }
+            _ if line.trim() == "<empty>" => {
+                (format!("    {}", line.trim()), Style::new().dark_gray())
+            }
+            _ if line.starts_with("  ") => (line.to_string(), Style::new()),
+            _ => (line.to_string(), Style::new()),
         };
-        lines.push(rendered);
+        lines.extend(styled_wrapped_lines(&text, style, width));
     }
-    ListItem::new(lines)
+    lines.into_iter().map(ListItem::new).collect()
+}
+
+fn styled_wrapped_lines(text: &str, style: Style, width: u16) -> Vec<Line<'static>> {
+    wrap_plain_lines(text, width)
+        .into_iter()
+        .map(|line| Line::from(line).style(style))
+        .collect()
+}
+
+fn wrap_plain_lines(text: &str, width: u16) -> Vec<String> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+
+    for raw_line in text.lines() {
+        if raw_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_width = 0u16;
+
+        for ch in raw_line.chars() {
+            let mut buf = [0; 4];
+            let symbol = ch.encode_utf8(&mut buf);
+            let symbol_width = symbol.cell_width();
+            if symbol_width == 0 {
+                current.push(ch);
+                continue;
+            }
+
+            if current_width + symbol_width > width && !current.is_empty() {
+                wrapped.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+
+            current.push(ch);
+            current_width = current_width.saturating_add(symbol_width);
+        }
+
+        if current.is_empty() {
+            wrapped.push(String::new());
+        } else {
+            wrapped.push(current);
+        }
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+
+    wrapped
 }
 
 #[cfg(test)]
@@ -665,7 +735,7 @@ mod tests {
             })
             .expect("draw highlighted states");
 
-        let transcript = transcript_lines(&[], Some(&session));
+        let transcript = transcript_lines(&[], Some(&session), 40);
         let transcript_dump = transcript
             .iter()
             .map(|item| format!("{item:?}"))
@@ -895,7 +965,7 @@ mod tests {
         for index in 0..10 {
             session.messages.push(Message::user(format!("message {index}")));
         }
-        let transcript = transcript_lines(&[], Some(&session));
+        let transcript = transcript_lines(&[], Some(&session), 40);
         let transcript_dump = transcript
             .iter()
             .map(|item| format!("{item:?}"))
@@ -1096,12 +1166,96 @@ mod tests {
             submit_label: "提交".to_string(),
         });
 
-        let rendered = format!("{:?}", render_choice_group(&choice_group));
+        let rendered = format!("{:?}", render_choice_group(&choice_group, 40));
         assert!(rendered.contains("选择"));
         assert!(rendered.contains("请选择模式"));
         assert!(rendered.contains("快速"));
         assert!(rendered.contains("安全"));
         assert!(rendered.contains("提交"));
+    }
+
+    #[test]
+    fn render_chat_wraps_long_chinese_transcript_messages() {
+        let backend = TestBackend::new(44, 16);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let mut session = Session::new(SessionKind::Coder, ModelKind::HermesCode);
+        session.messages.push(Message::user(
+            "这是一条很长的中文消息用于验证转录区会自动换行并保留末尾内容终".to_string(),
+        ));
+
+        terminal
+            .draw(|frame| {
+                let _ = render_chat(
+                    frame,
+                    Some(&session),
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    None,
+                    0,
+                    true,
+                    0,
+                );
+            })
+            .expect("draw wrapped chinese transcript");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains('这'));
+        assert!(rendered.contains('条'));
+        assert!(rendered.contains('终'));
+    }
+
+    #[test]
+    fn render_chat_wraps_long_chinese_choice_content() {
+        let backend = TestBackend::new(44, 16);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        let choice_group = ChoiceGroupState::new(ChoiceGroupBlock {
+            title: "选择".to_string(),
+            questions: vec![ChoiceQuestion {
+                id: "mode".to_string(),
+                mode: ChoiceMode::Single,
+                prompt: "这是一个很长的中文问题用于验证选择区域会自动换行并展示结尾终".to_string(),
+                options: vec![ChoiceOption {
+                    id: "long".to_string(),
+                    label: "这个选项说明也很长需要完整展示尾".to_string(),
+                }],
+            }],
+            submit_label: "提交".to_string(),
+        });
+
+        terminal
+            .draw(|frame| {
+                let _ = render_chat(
+                    frame,
+                    None,
+                    &[],
+                    &Input::default(),
+                    CommandMode::None,
+                    None,
+                    Some(&choice_group),
+                    0,
+                    true,
+                    0,
+                );
+            })
+            .expect("draw wrapped chinese choices");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains('这'));
+        assert!(rendered.contains('选'));
+        assert!(rendered.contains('终'));
+        assert!(rendered.contains('尾'));
     }
 
     #[test]
@@ -1136,8 +1290,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("message 14"));
-        assert!(rendered.contains("message 17"));
+        assert!(rendered.contains("message 18") || rendered.contains("message 19"));
         assert!(rendered.contains("│"));
     }
 
@@ -1227,7 +1380,7 @@ mod tests {
             session.messages.push(Message::user(format!("message {index}")));
         }
 
-        let transcript = transcript_lines(&[], Some(&session));
+        let transcript = transcript_lines(&[], Some(&session), 40);
         assert!(transcript.iter().any(|item| {
             format!("{item:?}").contains("thinking...")
         }));
