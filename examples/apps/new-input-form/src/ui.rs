@@ -157,10 +157,15 @@ fn render_tool_block(
     event: &crate::agent::ToolEvent,
     focused: bool,
 ) -> Paragraph<'static> {
+    let (accent, title_color) = match event.kind {
+        crate::agent::ToolKind::Read => (Color::Cyan, Color::Cyan),
+        crate::agent::ToolKind::Write => (Color::Yellow, Color::Yellow),
+        crate::agent::ToolKind::Execute => (Color::Magenta, Color::Magenta),
+    };
     let status_style = match event.status {
         crate::agent::ToolStatus::Idle => Style::new().dark_gray(),
-        crate::agent::ToolStatus::Queued => Style::new().fg(Color::Cyan),
-        crate::agent::ToolStatus::Running => Style::new().fg(Color::Yellow).bold(),
+        crate::agent::ToolStatus::Queued => Style::new().fg(accent),
+        crate::agent::ToolStatus::Running => Style::new().fg(accent).bold(),
         crate::agent::ToolStatus::Done => Style::new().fg(Color::Green),
         crate::agent::ToolStatus::Error => Style::new().fg(Color::Red).bold(),
     };
@@ -195,9 +200,11 @@ fn render_tool_block(
     let block = if focused {
         Block::bordered()
             .title(title)
-            .border_style(Style::new().fg(Color::Cyan).bold())
+            .border_style(Style::new().fg(title_color).bold())
     } else {
-        Block::bordered().title(title)
+        Block::bordered()
+            .title(title)
+            .border_style(Style::new().fg(accent))
     };
     Paragraph::new(lines).block(block)
 }
@@ -1406,6 +1413,9 @@ mod tests {
         assert!(rendered.contains("RUNNING"));
         assert!(rendered.contains("DONE"));
         assert!(rendered.contains("ERROR"));
+        assert!(rendered.contains("[RUNNING]"));
+        assert!(rendered.contains("[DONE]"));
+        assert!(rendered.contains("[ERROR]"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("src/ui.rs"));
         assert!(rendered.contains("cargo test -p new-input-form"));
