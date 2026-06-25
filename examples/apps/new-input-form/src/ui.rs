@@ -85,7 +85,7 @@ pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboa
         Span::from("  workspace-bound tools"),
     ]);
     frame.render_widget(Block::bordered().title(header), header_area);
-    frame.render_widget(render_command_bar(state), command_area);
+    frame.render_widget(render_command_bar(state, state.focused), command_area);
 
     let columns = Layout::horizontal([
         Constraint::Percentage(33),
@@ -115,13 +115,18 @@ pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboa
     0
 }
 
-fn render_command_bar(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
+fn render_command_bar(state: &ClaudeCodeDashboardState, focused: crate::agent::ToolKind) -> Paragraph<'static> {
     let counts = tool_status_counts(state);
     let last = state
         .activity_log
         .last()
         .map(|event| format!("{:?} {:?} {}", event.kind, event.status, event.target))
         .unwrap_or_else(|| "no recent activity".to_string());
+    let focus_label = match focused {
+        crate::agent::ToolKind::Read => "focused: Read",
+        crate::agent::ToolKind::Write => "focused: Write",
+        crate::agent::ToolKind::Execute => "focused: Execute",
+    };
     let shortcuts = Line::from(vec![
         Span::from("r").bold().fg(Color::Cyan),
         Span::from(" read  "),
@@ -140,6 +145,8 @@ fn render_command_bar(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
         Span::from(format!("error: {}", counts.error)).style(Style::new().fg(Color::Red)),
         Span::from("  "),
         Span::from(format!("log: {}", state.activity_log.len())).style(Style::new().dark_gray()),
+        Span::from("  "),
+        Span::from(focus_label).style(Style::new().fg(Color::Cyan).bold()),
     ]);
     let last_line = Line::from(format!("last: {last}")).style(Style::new().dark_gray());
     Paragraph::new(vec![shortcuts, stats, last_line]).block(Block::bordered().title("Command bar"))
@@ -163,6 +170,11 @@ fn render_tool_block(
     if let Some(elapsed) = event.elapsed_ms {
         lines.push(Line::from(format!("elapsed: {elapsed}ms")));
     }
+    let title = if focused {
+        format!("{title} [focused]")
+    } else {
+        title.to_string()
+    };
     let block = if focused {
         Block::bordered()
             .title(title)
@@ -1373,6 +1385,7 @@ mod tests {
         assert!(rendered.contains("running:"));
         assert!(rendered.contains("done:"));
         assert!(rendered.contains("error:"));
+        assert!(rendered.contains("focused:"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("src/ui.rs"));
         assert!(rendered.contains("cargo test -p new-input-form"));
