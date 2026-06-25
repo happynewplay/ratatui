@@ -74,14 +74,23 @@ pub fn render_model_select(frame: &mut Frame, session_index: usize, selected: us
 
 pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboardState) -> usize {
     let layout = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(1),
-        Constraint::Length(8),
+        Constraint::Length(9),
     ]);
     let [header_area, body_area, log_area] = frame.area().layout(&layout);
     let header = Line::from_iter([
         Span::from("Claude Code").bold(),
         Span::from("  workspace-bound tools"),
+        Span::from("  "),
+        Span::from("r").bold(),
+        Span::from(" read  "),
+        Span::from("w").bold(),
+        Span::from(" write  "),
+        Span::from("e").bold(),
+        Span::from(" execute  "),
+        Span::from("Esc").bold(),
+        Span::from(" back"),
     ]);
     frame.render_widget(Block::bordered().title(header), header_area);
 
@@ -122,7 +131,7 @@ fn render_activity_log(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
     if state.activity_log.is_empty() {
         lines.push(Line::from("No tool activity yet").style(Style::new().dark_gray()));
     } else {
-        for event in state.activity_log.iter().rev().take(5) {
+        for event in state.activity_log.iter().rev().take(6) {
             lines.push(Line::from(format!("{:?}: {:?} -> {}", event.kind, event.status, event.target)));
             if !event.summary.is_empty() {
                 lines.push(Line::from(format!("  {}", event.summary)).style(Style::new().dark_gray()));
@@ -1290,6 +1299,9 @@ mod tests {
         assert!(rendered.contains("Write"));
         assert!(rendered.contains("Execute"));
         assert!(rendered.contains("Activity log"));
+        assert!(rendered.contains("r"));
+        assert!(rendered.contains("w"));
+        assert!(rendered.contains("e"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("src/ui.rs"));
         assert!(rendered.contains("cargo test -p new-input-form"));
