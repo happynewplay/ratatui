@@ -14,6 +14,7 @@ enum AppState {
     SessionSelect,
     ModelSelect,
     Chat,
+    ClaudeCodeDashboard,
 }
 
 pub struct App {
@@ -28,6 +29,7 @@ pub struct App {
     command_mode: CommandMode,
     command_picker: Option<CommandPicker>,
     choice_group: Option<ChoiceGroupState>,
+    claude_code_state: crate::agent::ClaudeCodeDashboardState,
     follow_transcript: bool,
     transcript_scroll: usize,
     needs_terminal_clear: bool,
@@ -47,6 +49,7 @@ impl Default for App {
             command_mode: CommandMode::None,
             command_picker: None,
             choice_group: None,
+            claude_code_state: crate::agent::ClaudeCodeDashboardState::new(),
             follow_transcript: true,
             transcript_scroll: 0,
             needs_terminal_clear: false,
@@ -78,6 +81,11 @@ impl App {
                             }
                         }
                         (AppState::Chat, Event::Mouse(mouse)) => self.handle_mouse(mouse),
+                        (AppState::ClaudeCodeDashboard, Event::Key(key)) => {
+                            if self.handle_claude_code(key) {
+                                return Ok(());
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -129,7 +137,11 @@ impl App {
                 self.session_index = (self.session_index + 1).min(SessionKind::ALL.len() - 1);
             }
             KeyCode::Enter => {
-                self.state = AppState::ModelSelect;
+                self.state = if self.session_index == SessionKind::ALL.len() - 1 {
+                    AppState::ClaudeCodeDashboard
+                } else {
+                    AppState::ModelSelect
+                };
             }
             KeyCode::Char('q') => {}
             _ => {}
@@ -347,6 +359,20 @@ impl App {
                 self.follow_transcript,
                 self.transcript_scroll,
             ),
+            AppState::ClaudeCodeDashboard => ui::render_claude_code_dashboard(
+                frame,
+                &self.claude_code_state,
+            ),
+        }
+    }
+
+    fn handle_claude_code(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state = AppState::SessionSelect;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -808,6 +834,17 @@ mod tests {
 
         assert!(!handled);
         assert!(app.choice_group.is_none());
+    }
+
+    #[test]
+    fn session_select_lists_claude_code_last_and_enters_dashboard() {
+        let mut app = App::default();
+        app.state = AppState::SessionSelect;
+        app.session_index = SessionKind::ALL.len() - 1;
+
+        app.handle_session_select(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.state, AppState::ClaudeCodeDashboard));
     }
 
     #[test]

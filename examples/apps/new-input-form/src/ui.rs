@@ -1,5 +1,5 @@
 use crate::agent::{
-    ChoiceGroupState, FocusTarget, Message, ModelKind, Session, SessionKind,
+    ChoiceGroupState, ClaudeCodeDashboardState, FocusTarget, Message, ModelKind, Session, SessionKind,
 };
 use crate::input_commands::{CommandKind, CommandMode, CommandPicker};
 use ratatui::buffer::CellWidth;
@@ -70,6 +70,25 @@ pub fn render_model_select(frame: &mut Frame, session_index: usize, selected: us
         Block::bordered().title(Line::from(format!("{} mode", session.label())).bold()),
     );
     frame.render_widget(list, list_area);
+}
+
+pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboardState) -> usize {
+    let layout = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]);
+    let [header_area, body_area] = frame.area().layout(&layout);
+    frame.render_widget(
+        Block::bordered().title(Line::from("Claude Code").bold()),
+        header_area,
+    );
+    let body = Paragraph::new(format!(
+        "Read: {:?}\nWrite: {:?}\nExecute: {:?}\nActivity log: {}",
+        state.read.status,
+        state.write.status,
+        state.execute.status,
+        state.activity_log.len()
+    ))
+    .block(Block::bordered().title("Workspace tools"));
+    frame.render_widget(body, body_area);
+    0
 }
 
 pub fn render_chat(

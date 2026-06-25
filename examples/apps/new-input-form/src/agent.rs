@@ -12,16 +12,18 @@ pub enum SessionKind {
     Planner,
     Coder,
     Reviewer,
+    ClaudeCode,
 }
 
 impl SessionKind {
-    pub const ALL: [Self; 3] = [Self::Planner, Self::Coder, Self::Reviewer];
+    pub const ALL: [Self; 4] = [Self::Planner, Self::Coder, Self::Reviewer, Self::ClaudeCode];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Planner => "Planner",
             Self::Coder => "Coder",
             Self::Reviewer => "Reviewer",
+            Self::ClaudeCode => "Claude Code",
         }
     }
 
@@ -30,6 +32,7 @@ impl SessionKind {
             Self::Planner => "Break work into steps and scope.",
             Self::Coder => "Implement code and validate changes.",
             Self::Reviewer => "Inspect diffs and note risks.",
+            Self::ClaudeCode => "Explore workspace tools in a segmented dashboard.",
         }
     }
 }
