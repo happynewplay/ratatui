@@ -35,6 +35,64 @@ impl SessionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    Read,
+    Write,
+    Execute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStatus {
+    Idle,
+    Queued,
+    Running,
+    Done,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEvent {
+    pub kind: ToolKind,
+    pub status: ToolStatus,
+    pub target: String,
+    pub summary: String,
+    pub error: Option<String>,
+    pub elapsed_ms: Option<u64>,
+}
+
+impl ToolEvent {
+    pub fn new(kind: ToolKind, target: impl Into<String>) -> Self {
+        Self {
+            kind,
+            status: ToolStatus::Idle,
+            target: target.into(),
+            summary: String::new(),
+            error: None,
+            elapsed_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCodeDashboardState {
+    pub read: ToolEvent,
+    pub write: ToolEvent,
+    pub execute: ToolEvent,
+    pub activity_log: Vec<ToolEvent>,
+}
+
+impl ClaudeCodeDashboardState {
+    pub fn new() -> Self {
+        Self {
+            read: ToolEvent::new(ToolKind::Read, ""),
+            write: ToolEvent::new(ToolKind::Write, ""),
+            execute: ToolEvent::new(ToolKind::Execute, ""),
+            activity_log: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelKind {
     HermesSmall,
     HermesPro,
@@ -1145,6 +1203,19 @@ mod tests {
         assert!(transcript.contains("status: exit status 0"));
         assert!(transcript.contains("stdout:\n  hi\n  there"));
         assert!(transcript.contains("stderr:\n  <empty>"));
+    }
+
+    #[test]
+    fn tool_event_model_covers_read_write_execute() {
+        let read = ToolEvent::new(ToolKind::Read, "workspace/src/main.rs");
+        let write = ToolEvent::new(ToolKind::Write, "workspace/src/ui.rs");
+        let execute = ToolEvent::new(ToolKind::Execute, "cargo test -p new-input-form");
+
+        assert_eq!(read.kind, ToolKind::Read);
+        assert_eq!(write.kind, ToolKind::Write);
+        assert_eq!(execute.kind, ToolKind::Execute);
+        assert_eq!(read.status, ToolStatus::Idle);
+        assert!(ClaudeCodeDashboardState::new().activity_log.is_empty());
     }
 
     #[test]
