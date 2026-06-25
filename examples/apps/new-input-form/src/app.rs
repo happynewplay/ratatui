@@ -1,4 +1,7 @@
-use crate::agent::{ChoiceGroupState, FocusTarget, PendingTurn, Session, SessionKind, ModelKind};
+use crate::agent::{
+    ChoiceGroupState, ClaudeCodeDashboardState, FocusTarget, PendingTurn, Session, SessionKind,
+    ModelKind, ToolEvent, ToolKind, ToolStatus,
+};
 use crate::input_commands::{CommandMode, CommandPicker, PickerOutcome};
 use crate::ui;
 use color_eyre::Result;
@@ -29,7 +32,7 @@ pub struct App {
     command_mode: CommandMode,
     command_picker: Option<CommandPicker>,
     choice_group: Option<ChoiceGroupState>,
-    claude_code_state: crate::agent::ClaudeCodeDashboardState,
+    claude_code_state: ClaudeCodeDashboardState,
     follow_transcript: bool,
     transcript_scroll: usize,
     needs_terminal_clear: bool,
@@ -49,7 +52,7 @@ impl Default for App {
             command_mode: CommandMode::None,
             command_picker: None,
             choice_group: None,
-            claude_code_state: crate::agent::ClaudeCodeDashboardState::new(),
+            claude_code_state: ClaudeCodeDashboardState::new(),
             follow_transcript: true,
             transcript_scroll: 0,
             needs_terminal_clear: false,
@@ -374,6 +377,17 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn apply_tool_event(&mut self, event: ToolEvent) {
+        let target = event.target.clone();
+        match event.kind {
+            ToolKind::Read => self.claude_code_state.read = event.clone(),
+            ToolKind::Write => self.claude_code_state.write = event.clone(),
+            ToolKind::Execute => self.claude_code_state.execute = event.clone(),
+        }
+        self.claude_code_state.activity_log.push(event);
+        self.input = Input::from(target);
     }
 
     fn sync_transcript_scroll(&mut self, max_transcript_scroll: usize) {
@@ -845,6 +859,25 @@ mod tests {
         app.handle_session_select(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(matches!(app.state, AppState::ClaudeCodeDashboard));
+    }
+
+    #[test]
+    fn execute_tool_event_updates_dashboard_state() {
+        let mut app = App::default();
+        app.state = AppState::ClaudeCodeDashboard;
+
+        app.apply_tool_event(ToolEvent {
+            kind: ToolKind::Execute,
+            status: ToolStatus::Running,
+            target: "cargo test -p new-input-form".to_string(),
+            summary: "running".to_string(),
+            error: None,
+            elapsed_ms: Some(38),
+        });
+
+        assert_eq!(app.claude_code_state.execute.status, ToolStatus::Running);
+        assert_eq!(app.claude_code_state.activity_log.len(), 1);
+        assert_eq!(app.claude_code_state.activity_log[0].target, "cargo test -p new-input-form");
     }
 
     #[test]
