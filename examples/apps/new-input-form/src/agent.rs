@@ -74,6 +74,33 @@ impl ToolEvent {
             elapsed_ms: None,
         }
     }
+
+    pub fn transcript(&self) -> String {
+        let kind = match self.kind {
+            ToolKind::Read => "read",
+            ToolKind::Write => "write",
+            ToolKind::Execute => "execute",
+        };
+        let status = match self.status {
+            ToolStatus::Idle => "idle",
+            ToolStatus::Queued => "queued",
+            ToolStatus::Running => "running",
+            ToolStatus::Done => "done",
+            ToolStatus::Error => "error",
+        };
+        let mut lines = vec![format!("tool: {kind} -> {}", self.target)];
+        lines.push(format!("status: {status}"));
+        if !self.summary.is_empty() {
+            lines.push(format!("summary: {}", self.summary));
+        }
+        if let Some(error) = &self.error {
+            lines.push(format!("error: {error}"));
+        }
+        if let Some(elapsed) = self.elapsed_ms {
+            lines.push(format!("elapsed: {elapsed}ms"));
+        }
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +109,7 @@ pub struct ClaudeCodeDashboardState {
     pub write: ToolEvent,
     pub execute: ToolEvent,
     pub activity_log: Vec<ToolEvent>,
+    pub messages: Vec<Message>,
     pub focused: ToolKind,
 }
 
@@ -92,6 +120,7 @@ impl ClaudeCodeDashboardState {
             write: ToolEvent::new(ToolKind::Write, ""),
             execute: ToolEvent::new(ToolKind::Execute, ""),
             activity_log: Vec::new(),
+            messages: Vec::new(),
             focused: ToolKind::Read,
         }
     }
