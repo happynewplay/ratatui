@@ -75,24 +75,17 @@ pub fn render_model_select(frame: &mut Frame, session_index: usize, selected: us
 pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboardState) -> usize {
     let layout = Layout::vertical([
         Constraint::Length(4),
+        Constraint::Length(4),
         Constraint::Min(1),
         Constraint::Length(9),
     ]);
-    let [header_area, body_area, log_area] = frame.area().layout(&layout);
+    let [header_area, command_area, body_area, log_area] = frame.area().layout(&layout);
     let header = Line::from_iter([
         Span::from("Claude Code").bold(),
         Span::from("  workspace-bound tools"),
-        Span::from("  "),
-        Span::from("r").bold(),
-        Span::from(" read  "),
-        Span::from("w").bold(),
-        Span::from(" write  "),
-        Span::from("e").bold(),
-        Span::from(" execute  "),
-        Span::from("Esc").bold(),
-        Span::from(" back"),
     ]);
     frame.render_widget(Block::bordered().title(header), header_area);
+    frame.render_widget(render_command_bar(state), command_area);
 
     let columns = Layout::horizontal([
         Constraint::Percentage(33),
@@ -107,6 +100,36 @@ pub fn render_claude_code_dashboard(frame: &mut Frame, state: &ClaudeCodeDashboa
     let log = render_activity_log(state);
     frame.render_widget(log, log_area);
     0
+}
+
+fn render_command_bar(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
+    let counts = tool_status_counts(state);
+    let last = state
+        .activity_log
+        .last()
+        .map(|event| format!("{:?} {:?} {}", event.kind, event.status, event.target))
+        .unwrap_or_else(|| "no recent activity".to_string());
+    let shortcuts = Line::from(vec![
+        Span::from("r").bold().fg(Color::Cyan),
+        Span::from(" read  "),
+        Span::from("w").bold().fg(Color::Yellow),
+        Span::from(" write  "),
+        Span::from("e").bold().fg(Color::Magenta),
+        Span::from(" execute  "),
+        Span::from("Esc").bold().fg(Color::DarkGray),
+        Span::from(" back"),
+    ]);
+    let stats = Line::from(vec![
+        Span::from(format!("running: {}", counts.running)).style(Style::new().fg(Color::Yellow)),
+        Span::from("  "),
+        Span::from(format!("done: {}", counts.done)).style(Style::new().fg(Color::Green)),
+        Span::from("  "),
+        Span::from(format!("error: {}", counts.error)).style(Style::new().fg(Color::Red)),
+        Span::from("  "),
+        Span::from(format!("log: {}", state.activity_log.len())).style(Style::new().dark_gray()),
+    ]);
+    let last_line = Line::from(format!("last: {last}")).style(Style::new().dark_gray());
+    Paragraph::new(vec![shortcuts, stats, last_line]).block(Block::bordered().title("Command bar"))
 }
 
 fn render_tool_block(title: &'static str, event: &crate::agent::ToolEvent) -> Paragraph<'static> {
@@ -139,6 +162,26 @@ fn render_activity_log(state: &ClaudeCodeDashboardState) -> Paragraph<'static> {
         }
     }
     Paragraph::new(lines).block(Block::bordered().title("Activity log"))
+}
+
+#[derive(Default)]
+struct ToolStatusCounts {
+    running: usize,
+    done: usize,
+    error: usize,
+}
+
+fn tool_status_counts(state: &ClaudeCodeDashboardState) -> ToolStatusCounts {
+    let mut counts = ToolStatusCounts::default();
+    for event in [&state.read, &state.write, &state.execute] {
+        match event.status {
+            crate::agent::ToolStatus::Running => counts.running += 1,
+            crate::agent::ToolStatus::Done => counts.done += 1,
+            crate::agent::ToolStatus::Error => counts.error += 1,
+            crate::agent::ToolStatus::Idle | crate::agent::ToolStatus::Queued => {}
+        }
+    }
+    counts
 }
 
 pub fn render_chat(
@@ -1302,6 +1345,10 @@ mod tests {
         assert!(rendered.contains("r"));
         assert!(rendered.contains("w"));
         assert!(rendered.contains("e"));
+        assert!(rendered.contains("Command bar"));
+        assert!(rendered.contains("running:"));
+        assert!(rendered.contains("done:"));
+        assert!(rendered.contains("error:"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("src/ui.rs"));
         assert!(rendered.contains("cargo test -p new-input-form"));
