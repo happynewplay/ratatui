@@ -30,6 +30,7 @@ pub struct App {
     choice_group: Option<ChoiceGroupState>,
     follow_transcript: bool,
     transcript_scroll: usize,
+    needs_terminal_clear: bool,
 }
 
 impl Default for App {
@@ -48,6 +49,7 @@ impl Default for App {
             choice_group: None,
             follow_transcript: true,
             transcript_scroll: 0,
+            needs_terminal_clear: false,
         }
     }
 }
@@ -55,6 +57,10 @@ impl Default for App {
 impl App {
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
+            if self.needs_terminal_clear {
+                terminal.clear()?;
+                self.needs_terminal_clear = false;
+            }
             let mut max_transcript_scroll = 0;
             terminal.draw(|frame| {
                 max_transcript_scroll = self.render(frame);
@@ -260,6 +266,7 @@ impl App {
                         self.follow_transcript = true;
                         self.transcript_scroll = 0;
                         self.input.reset();
+                        self.needs_terminal_clear = true;
                     }
                 }
             }
@@ -457,6 +464,7 @@ mod tests {
         assert!(!handled);
         assert!(app.follow_transcript);
         assert_eq!(app.transcript_scroll, 0);
+        assert!(app.needs_terminal_clear);
     }
 
     #[test]
@@ -474,6 +482,62 @@ mod tests {
         assert!(app.follow_transcript);
         assert_eq!(app.transcript_scroll, 0);
         assert_eq!(app.input.value(), "");
+    }
+
+    #[test]
+    fn sending_chinese_message_clears_input_before_next_render() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.input = Input::from("发送中文");
+
+        let handled = app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!handled);
+        assert_eq!(app.input.value(), "");
+        assert_eq!(app.input.cursor(), 0);
+        assert!(app.follow_transcript);
+        assert_eq!(app.transcript_scroll, 0);
+    }
+
+    #[test]
+    fn sending_chinese_message_renders_clean_prompt_on_next_frame() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.input = Input::from("发送中文");
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("create terminal");
+        terminal
+            .draw(|frame| {
+                let _ = app.render(frame);
+            })
+            .expect("draw after submit");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Prompt"));
+        assert!(rendered.contains("Enter send"));
+        assert!(!rendered.contains("发送中文"));
+    }
+
+    #[test]
+    fn sending_chinese_message_requests_terminal_clear() {
+        let mut app = App::default();
+        app.state = AppState::Chat;
+        app.current_session = Some(Session::new(SessionKind::Coder, ModelKind::HermesCode));
+        app.input = Input::from("发送中文");
+
+        assert!(!app.handle_chat(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.needs_terminal_clear);
     }
 
     #[test]

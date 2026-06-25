@@ -91,11 +91,11 @@ pub fn render_chat(
         .map(|picker| picker_popup_height(picker) + 2)
         .unwrap_or(0);
     let bottom_height = if choice_height > 0 {
-        3 + choice_height
+        4 + choice_height
     } else if picker_height > 0 {
-        3 + picker_height
+        4 + picker_height
     } else {
-        3
+        4
     };
     let layout = Layout::vertical([
         Constraint::Length(3),
@@ -103,22 +103,26 @@ pub fn render_chat(
         Constraint::Length(bottom_height),
     ]);
     let [header_area, transcript_area, bottom_area] = frame.area().layout(&layout);
-    let (input_area, picker_area, choice_area) = if choice_height > 0 {
+    let (input_area, footer_area, picker_area, choice_area) = if choice_height > 0 {
         let bottom_layout = Layout::vertical([
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(choice_height),
         ]);
-        let [input_area, choice_area] = bottom_area.layout(&bottom_layout);
-        (input_area, None, Some(choice_area))
+        let [input_area, footer_area, choice_area] = bottom_area.layout(&bottom_layout);
+        (input_area, footer_area, None, Some(choice_area))
     } else if picker_height > 0 {
         let bottom_layout = Layout::vertical([
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(picker_height),
         ]);
-        let [input_area, picker_area] = bottom_area.layout(&bottom_layout);
-        (input_area, Some(picker_area), None)
+        let [input_area, footer_area, picker_area] = bottom_area.layout(&bottom_layout);
+        (input_area, footer_area, Some(picker_area), None)
     } else {
-        (bottom_area, None, None)
+        let bottom_layout = Layout::vertical([Constraint::Length(3), Constraint::Length(1)]);
+        let [input_area, footer_area] = bottom_area.layout(&bottom_layout);
+        (input_area, footer_area, None, None)
     };
     let body = Layout::horizontal([Constraint::Length(28), Constraint::Min(1)]);
     let [sidebar_area, transcript_body] = transcript_area.layout(&body);
@@ -239,7 +243,8 @@ pub fn render_chat(
     frame.set_cursor_position((input_area.x + 1 + cursor, input_area.y + 1));
 
     let footer = build_footer(command_mode, command_picker, choice_group, status);
-    frame.render_widget(footer, input_area.inner(Margin::new(1, 0)));
+    frame.render_widget(Clear, footer_area);
+    frame.render_widget(footer, footer_area);
 
     transcript_total_len.saturating_sub(transcript_window)
 }
